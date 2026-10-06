@@ -193,19 +193,32 @@ class Workspace:
     def resolve_active_session(self, db: Database, state: State) -> tuple[Session, bool]:
         """Return the active session (creating one if needed) and whether it was created.
 
-        Prefers the session recorded in ``state.json``; otherwise resumes the active
-        session for the current branch, or starts a new one. Updates ``state`` in place.
+        Prefers the session recorded in ``state.json`` while it is active and on the
+        current branch. On a branch change, resumes that branch's active session or
+        starts a new one (a detached HEAD keeps the current session). Updates ``state``.
         """
         session = db.get_session(state.active_session_id) if state.active_session_id else None
         created = False
-        if session is None or session.status != "active":
-            branch = detect_branch(self.root)
+        branch = detect_branch(self.root)
+        branch_changed = (
+            session is not None and branch != UNKNOWN_BRANCH and session.branch_name != branch
+        )
+        if session is None or session.status != "active" or branch_changed:
             session = db.find_active_session(branch)
             if session is None:
                 session = db.create_session(branch)
                 created = True
         state.active_session_id = session.id
         state.active_branch = session.branch_name
+        return session, created
+
+    def active_session(self, db: Database) -> tuple[Session, bool]:
+        """Resolve the active session and persist ``state.json`` if it changed."""
+        state = self.load_state()
+        previous = (state.active_session_id, state.active_branch)
+        session, created = self.resolve_active_session(db, state)
+        if (state.active_session_id, state.active_branch) != previous:
+            self.save_state(state)
         return session, created
 
     # ----- logging -----------------------------------------------------------

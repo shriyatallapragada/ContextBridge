@@ -29,7 +29,7 @@ def _decisions(repo: Path) -> list[tuple[str, str]]:
 def test_init_creates_workspace(git_repo: Path) -> None:
     code, out = cb("init")
     assert code == 0, out
-    assert "Database schema at v1" in out
+    assert "Database schema at v2" in out
     ctx = git_repo / ".context"
     assert (ctx / "state.db").is_file()
     assert (ctx / "config.json").is_file()

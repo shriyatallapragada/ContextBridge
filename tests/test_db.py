@@ -7,7 +7,15 @@ from pathlib import Path
 import pytest
 
 from contextbridge.errors import StorageError, UserError
-from contextbridge.storage.db import SCHEMA_VERSION, Database, new_id, parse_utc, utc_now
+from contextbridge.storage.db import (
+    _MIGRATION_1,
+    SCHEMA_VERSION,
+    Database,
+    _split_sql,
+    new_id,
+    parse_utc,
+    utc_now,
+)
 
 ISO_UTC = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
@@ -30,7 +38,12 @@ def test_schema_created_with_pragmas(db: Database) -> None:
     assert db.conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     assert db.conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     indexes = {r[0] for r in db.conn.execute("SELECT name FROM sqlite_master WHERE type='index'")}
-    assert {"idx_decisions_session", "idx_changes_session"} <= indexes
+    assert {
+        "idx_decisions_session",
+        "idx_changes_session",
+        "idx_test_runs_session",
+        "idx_changes_commit_file",
+    } <= indexes
 
 
 def test_migrate_is_idempotent(tmp_path: Path) -> None:
@@ -120,3 +133,89 @@ def test_check_constraint_on_tag(db: Database) -> None:
             "INSERT INTO decision_logs (id, session_id, content, tag) VALUES ('d', ?, 'c', 'zzz')",
             (s.id,),
         )
+
+
+# ----- Phase 2: migration 2, file changes, test runs -----------------------------
+
+
+def _v1_database(path: Path, *, with_test_runs: bool) -> None:
+    conn = sqlite3.connect(path)
+    for statement in _split_sql(_MIGRATION_1):
+        conn.execute(statement)
+    if with_test_runs:  # Phase 1 databases shipped test_runs inside migration 1.
+        conn.execute(
+            "CREATE TABLE test_runs (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, "
+            "command TEXT NOT NULL, exit_code INTEGER NOT NULL, passed INTEGER, failed INTEGER, "
+            "skipped INTEGER, failures TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        )
+    conn.execute("PRAGMA user_version = 1")
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.parametrize("with_test_runs", [True, False])
+def test_migration_1_to_2(tmp_path: Path, with_test_runs: bool) -> None:
+    path = tmp_path / "state.db"
+    _v1_database(path, with_test_runs=with_test_runs)
+    assert "test_runs" not in _MIGRATION_1
+    with Database.open(path, migrate=False) as db:
+        assert db.migrate() == 1
+        assert db.schema_version == 2 == SCHEMA_VERSION
+        assert "test_runs" in _tables(db)
+        s = db.create_session("main")
+        assert db.add_test_run(s.id, "pytest", 0, passed=1).passed == 1
+
+
+def test_file_change_roundtrip_and_commit_idempotency(db: Database) -> None:
+    s = db.create_session("main")
+    symbols = [{"name": "f", "kind": "function", "change": "modified", "signature": "def f()"}]
+    first = db.add_file_change(
+        s.id, "a.py", "modified", commit_sha="abc123", symbols=symbols, diff_snippet="@@ x"
+    )
+    assert first is not None
+    assert db.has_commit("abc123")
+    assert not db.has_commit("def456")
+    # Same (commit, file) again is ignored rather than duplicated.
+    assert db.add_file_change(s.id, "a.py", "modified", commit_sha="abc123") is None
+    # Working-tree rows (no commit) are never deduplicated.
+    assert db.add_file_change(s.id, "a.py", "modified") is not None
+    assert db.add_file_change(s.id, "a.py", "modified") is not None
+    changes = db.list_file_changes(s.id)
+    assert len(changes) == 3
+    stored = next(c for c in changes if c.commit_sha == "abc123")
+    assert stored.symbols == symbols
+    assert stored.diff_snippet == "@@ x"
+    with pytest.raises(UserError):
+        db.add_file_change(s.id, "a.py", "exploded")
+
+
+def test_file_change_is_sanitized(db: Database) -> None:
+    s = db.create_session("main")
+    secret = "AKIAIOSFODNN7EXAMPLE"
+    change = db.add_file_change(
+        s.id,
+        "cfg.py",
+        "modified",
+        commit_sha="abc",
+        symbols=[{"name": "f", "kind": "function", "change": "added", "signature": secret}],
+        diff_snippet=f"+key = '{secret}'",
+    )
+    assert change is not None
+    row = db.conn.execute("SELECT symbols_modified, diff_snippet FROM file_changes").fetchone()
+    assert secret not in row[0] and secret not in row[1]
+    assert "[REDACTED:aws_access_key]" in row[1]
+
+
+def test_test_run_roundtrip_sanitized_and_capped(db: Database) -> None:
+    s = db.create_session("main")
+    failures = [{"test": f"t{i}", "message": "token ghp_" + "a" * 36} for i in range(15)]
+    run = db.add_test_run(
+        s.id, "API_TOKEN=abc123 pytest", 1, passed=3, failed=15, skipped=0, failures=failures
+    )
+    assert len(run.failures) == 10
+    last = db.last_test_run(s.id)
+    assert last is not None and last.id == run.id
+    assert (last.passed, last.failed, last.skipped, last.exit_code) == (3, 15, 0, 1)
+    assert "abc123" not in last.command
+    assert all("ghp_" not in f["message"] for f in last.failures)
+    assert db.last_test_run(db.create_session("other").id) is None

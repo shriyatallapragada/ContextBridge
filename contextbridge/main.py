@@ -8,8 +8,10 @@ import typer
 
 from contextbridge import __version__
 from contextbridge.cli.common import AppContext, console
+from contextbridge.cli.hook_cmd import hook_app
 from contextbridge.cli.init_cmd import init_command
 from contextbridge.cli.log_cmd import log_command
+from contextbridge.cli.run_cmd import run_cmd_command
 from contextbridge.cli.status_cmd import status_command
 
 app = typer.Typer(
@@ -49,6 +51,8 @@ def main(
 app.command("init")(init_command)
 app.command("log")(log_command)
 app.command("status")(status_command)
+app.command("run", context_settings={"ignore_unknown_options": True})(run_cmd_command)
+app.add_typer(hook_app, name="hook")
 
 
 def run() -> None:
