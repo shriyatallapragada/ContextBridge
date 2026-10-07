@@ -345,21 +345,31 @@ def extract_symbols(source: str, language: str) -> list[Symbol]:
 # ----- mapping hunks to symbols ------------------------------------------------------------
 
 
-def _innermost(symbols: list[Symbol], line: int) -> Symbol | None:
-    best: Symbol | None = None
-    for sym in symbols:
+def _innermost(symbols: list[Symbol], line: int) -> int | None:
+    """Index of the smallest symbol containing ``line``."""
+    best: int | None = None
+    for i, sym in enumerate(symbols):
         if sym.start_line <= line <= sym.end_line and (
-            best is None or sym.end_line - sym.start_line < best.end_line - best.start_line
+            best is None
+            or sym.end_line - sym.start_line < symbols[best].end_line - symbols[best].start_line
         ):
-            best = sym
+            best = i
     return best
 
 
-def _by_name(symbols: list[Symbol]) -> dict[str, Symbol]:
-    out: dict[str, Symbol] = {}
+def _keys(symbols: list[Symbol]) -> list[str]:
+    """A unique key per symbol: the name, plus ``#n`` for later same-named definitions.
+
+    Property getter/setter pairs, JS ``get``/``set`` accessors and overloads share a
+    name; numbering them by occurrence lets old and new versions be matched one to one.
+    """
+    seen: dict[str, int] = {}
+    keys = []
     for sym in symbols:
-        out.setdefault(sym.name, sym)
-    return out
+        n = seen.get(sym.name, 0) + 1
+        seen[sym.name] = n
+        keys.append(sym.name if n == 1 else f"{sym.name}#{n}")
+    return keys
 
 
 def _entry(sym: Symbol, change: str) -> dict[str, str]:
@@ -370,42 +380,46 @@ def map_hunks_to_symbols(
     old_symbols: list[Symbol], new_symbols: list[Symbol], hunks: list[Hunk]
 ) -> list[dict[str, str]]:
     """Attribute changed lines to symbols and classify each as added/modified/removed."""
-    old_map, new_map = _by_name(old_symbols), _by_name(new_symbols)
+    old_keys, new_keys = _keys(old_symbols), _keys(new_symbols)
+    old_map = dict(zip(old_keys, old_symbols, strict=True))
+    new_map = dict(zip(new_keys, new_symbols, strict=True))
     results: dict[str, dict[str, str]] = {}
 
-    added_names = [n for n in new_map if n not in old_map]
-    removed_names = [n for n in old_map if n not in new_map]
-    for name in added_names:
-        sym = new_map[name]
+    added = [k for k in new_keys if k not in old_map]
+    removed = [k for k in old_keys if k not in new_map]
+    added_names = {new_map[k].name for k in added}
+    removed_names = {old_map[k].name for k in removed}
+    for key in added:
+        sym = new_map[key]
         # Report a new class, not each of its new methods as well.
         if sym.parent is None or sym.parent not in added_names:
-            results[name] = _entry(sym, "added")
-    for name in removed_names:
-        sym = old_map[name]
+            results[key] = _entry(sym, "added")
+    for key in removed:
+        sym = old_map[key]
         if sym.parent is None or sym.parent not in removed_names:
-            results[name] = _entry(sym, "removed")
+            results[key] = _entry(sym, "removed")
 
     touched: list[str] = []
     for hunk in hunks:
         for line in hunk.added:
             hit = _innermost(new_symbols, line)
             if hit is not None:
-                touched.append(hit.name)
+                touched.append(new_keys[hit])
         for line in hunk.removed:
             hit = _innermost(old_symbols, line)
             if hit is not None:
-                touched.append(hit.name)
-    for name in dict.fromkeys(touched):
-        if name in results or name not in old_map or name not in new_map:
+                touched.append(old_keys[hit])
+    for key in dict.fromkeys(touched):
+        if key in results or key not in old_map or key not in new_map:
             continue
-        if old_map[name].text != new_map[name].text:
-            results[name] = _entry(new_map[name], "modified")
+        if old_map[key].text != new_map[key].text:
+            results[key] = _entry(new_map[key], "modified")
 
     # Keep source order: new-file order first, then removed symbols.
-    order = {s.name: i for i, s in enumerate(new_symbols)}
-    order.update({n: len(order) + i for i, n in enumerate(removed_names)})
-    ordered = sorted(results.values(), key=lambda e: order.get(e["name"], 1 << 30))
-    return ordered[:MAX_SYMBOLS_PER_FILE]
+    order = {k: i for i, k in enumerate(new_keys)}
+    order.update({k: len(order) + i for i, k in enumerate(removed)})
+    ordered = sorted(results.items(), key=lambda item: order.get(item[0], 1 << 30))
+    return [entry for _, entry in ordered][:MAX_SYMBOLS_PER_FILE]
 
 
 # ----- fallback: hunk-header context -------------------------------------------------------
@@ -453,22 +467,39 @@ def symbols_for_change(
     old_source: str | None,
     new_source: str | None,
     patch: str,
+    *,
+    change_type: str | None = None,
 ) -> list[dict[str, str]]:
-    """Symbols touched by one file change. Never raises; degrades to [] (file level)."""
+    """Symbols touched by one file change. Never raises; degrades to [] (file level).
+
+    ``change_type`` is git's verdict (added/deleted/modified/renamed). When omitted it is
+    inferred from which sources are missing. A source that is missing for any other
+    reason (too large, unreadable) falls back to hunk-header context.
+    """
     try:
         hunks = parse_hunks(patch)
     except Exception:  # pragma: no cover - defensive
         log.debug("ast: cannot parse hunks for %s", path, exc_info=True)
         return []
+    if change_type is None:
+        change_type = (
+            "deleted" if new_source is None else "added" if old_source is None else "modified"
+        )
     language = detect_language(path)
     if language is not None:
         try:
-            old_syms = extract_symbols(old_source, language) if old_source is not None else []
-            new_syms = extract_symbols(new_source, language) if new_source is not None else []
-            if new_source is None:  # Deleted file.
+            if change_type == "deleted" and old_source is not None:
+                old_syms = extract_symbols(old_source, language)
                 return [_entry(s, "removed") for s in _top_level(old_syms)][:MAX_SYMBOLS_PER_FILE]
-            if old_source is None:  # Added file.
+            if change_type == "added" and new_source is not None:
+                new_syms = extract_symbols(new_source, language)
                 return [_entry(s, "added") for s in _top_level(new_syms)][:MAX_SYMBOLS_PER_FILE]
+            if old_source is None or new_source is None:
+                # e.g. a blob over the size limit: we cannot diff symbols reliably.
+                log.debug("ast: %s: source unavailable; using hunk context", path)
+                return symbols_from_hunk_context(hunks)
+            old_syms = extract_symbols(old_source, language)
+            new_syms = extract_symbols(new_source, language)
             mapped = map_hunks_to_symbols(old_syms, new_syms, hunks)
             if mapped or old_syms or new_syms:
                 return mapped

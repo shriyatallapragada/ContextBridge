@@ -21,6 +21,13 @@ _INSTALL_MESSAGES = {
 
 def _report_install(result: HookResult) -> None:
     path = escape(str(result.path))
+    if result.action == HookAction.disabled_hook:
+        console.print(
+            f"  • [yellow]![/] {path} exists but is not executable (disabled), so it was "
+            "left untouched and ContextBridge will not record commits. Make it executable "
+            "and re-run `cb init`, or remove it."
+        )
+        return
     if result.action == HookAction.unsupported_shell:
         console.print(
             f"  • [yellow]![/] {path} is not a shell script; hook not installed. Add this "
