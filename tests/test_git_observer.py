@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -235,8 +237,8 @@ def test_install_creates_executable_hook(obs: GitObserver, git_repo: Path) -> No
     content = _hook(git_repo).read_text()
     assert content.startswith("#!/bin/sh\n")
     assert HOOK_START in content and HOOK_END in content
-    assert "cb hook post-commit >/dev/null 2>&1 &" in content
-    assert "|| true" in content
+    assert "-m contextbridge.main hook post-commit" in content
+    assert ") >/dev/null 2>&1 &" in content  # backgrounded, output discarded
     assert _hook(git_repo).stat().st_mode & stat.S_IXUSR
 
 
@@ -263,6 +265,7 @@ def test_install_appends_to_existing_hook(obs: GitObserver, git_repo: Path) -> N
 
 def test_install_inserts_before_trailing_exit(obs: GitObserver, git_repo: Path) -> None:
     _hook(git_repo).write_text("#!/bin/sh\necho hi\nexit 0\n")
+    _hook(git_repo).chmod(0o755)
     obs.install_hook()
     content = _hook(git_repo).read_text()
     assert content.index(HOOK_END) < content.index("exit 0")
@@ -296,3 +299,40 @@ def test_installed_hook_does_not_block_commit(git_repo: Path, obs: GitObserver) 
     write(git_repo, "a.txt", "x")
     git(git_repo, "add", "a.txt")
     git(git_repo, "commit", "-q", "-m", "with hook")  # check=True: must exit 0
+
+
+def test_install_leaves_disabled_hook_untouched(obs: GitObserver, git_repo: Path) -> None:
+    """A non-executable hook is disabled; enabling it would run the user's old code."""
+    original = "#!/bin/sh\necho 'switched off on purpose'\n"
+    _hook(git_repo).write_text(original)
+    _hook(git_repo).chmod(0o644)
+    assert obs.install_hook().action == HookAction.disabled_hook
+    assert _hook(git_repo).read_text() == original
+    assert not _hook(git_repo).stat().st_mode & stat.S_IXUSR
+
+
+def test_refresh_keeps_user_permissions(obs: GitObserver, git_repo: Path) -> None:
+    obs.install_hook()
+    content = _hook(git_repo).read_text()
+    _hook(git_repo).write_text(content.replace("Installed by", "Old block, installed by"))
+    _hook(git_repo).chmod(0o644)  # user disabled the hook
+    assert obs.install_hook().action == HookAction.already_installed
+    assert not _hook(git_repo).stat().st_mode & stat.S_IXUSR
+
+
+def test_hook_prefers_installing_interpreter_over_cb_on_path(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    """An unrelated `cb` on PATH must not replace the interpreter that ran `cb init`."""
+    obs = GitObserver.open(git_repo)
+    obs.install_hook()
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    marker = tmp_path / "wrong-cb-ran"
+    fake = fake_bin / "cb"
+    fake.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+    fake.chmod(0o755)
+    env = {**os.environ, "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}"}
+    subprocess.run(["sh", str(_hook(git_repo))], cwd=git_repo, env=env, check=True)
+    time.sleep(1.5)  # the hook body runs in the background
+    assert not marker.exists()

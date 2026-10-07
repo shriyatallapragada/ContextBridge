@@ -107,6 +107,7 @@ class HookAction(StrEnum):
     appended = "appended"
     already_installed = "already_installed"
     unsupported_shell = "unsupported_shell"
+    disabled_hook = "disabled_hook"  # Existing hook is not executable; left untouched.
     removed = "removed"
     removed_file = "removed_file"
     not_installed = "not_installed"
@@ -187,19 +188,19 @@ def truncate_diff(diff: str, max_chars: int) -> str:
 def hook_block() -> str:
     """The shell snippet placed between the marker lines.
 
-    Runs in the background, discards output and never fails the commit. Prefers ``cb``
-    on PATH and falls back to the interpreter that installed the hook.
+    Runs in the background, discards output and never fails the commit. Uses the
+    interpreter that ran `cb init` first, so an unrelated or older `cb` on PATH cannot
+    take over; falls back to `cb` on PATH if that interpreter is gone.
     """
     python = shlex.quote(sys.executable)
     return "\n".join(
         [
             HOOK_START,
             "# Installed by `cb init`; remove with `cb init --uninstall-hooks`.",
-            "if command -v cb >/dev/null 2>&1; then",
-            "  (cb hook post-commit >/dev/null 2>&1 &) || true",
-            f"elif [ -x {python} ]; then",
-            f"  ({python} -m contextbridge.main hook post-commit >/dev/null 2>&1 &) || true",
-            "fi",
+            "(",
+            f"  if [ -x {python} ] && {python} -m contextbridge.main hook post-commit; then :",
+            "  elif command -v cb >/dev/null 2>&1; then cb hook post-commit; fi",
+            ") >/dev/null 2>&1 &",
             HOOK_END,
         ]
     )
@@ -504,12 +505,15 @@ class GitObserver:
                 new_content = _insert_block(stripped, block)
                 if new_content == content:
                     return HookResult(HookAction.already_installed, path)
-                # Refresh an outdated block in place (e.g. a new interpreter path).
+                # Refresh an outdated block in place (e.g. a new interpreter path),
+                # keeping the file's permissions as the user set them.
                 path.write_text(new_content, encoding="utf-8")
-                _make_executable(path)
                 return HookResult(HookAction.already_installed, path)
+            if not os.access(path, os.X_OK):
+                # Git ignores non-executable hooks; making it executable would also
+                # re-enable whatever the user deliberately switched off.
+                return HookResult(HookAction.disabled_hook, path)
             path.write_text(_insert_block(content, block), encoding="utf-8")
-            _make_executable(path)
             return HookResult(HookAction.appended, path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"#!/bin/sh\n\n{block}\n", encoding="utf-8")

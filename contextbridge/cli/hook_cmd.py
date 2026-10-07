@@ -54,7 +54,9 @@ def record_commit(
     added = 0
     for change in result.files:
         old, new = _sources(observer, sha, parent, change)
-        symbols = symbols_for_change(change.path, old, new, change.patch)
+        symbols = symbols_for_change(
+            change.path, old, new, change.patch, change_type=change.change_type.value
+        )
         row = db.add_file_change(
             session_id,
             change.path,

@@ -432,3 +432,38 @@ def test_cb_run_as_real_subprocess(initialized: Path) -> None:
     assert proc.returncode == 4
     assert proc.stdout == "out\n"
     assert "recorded exit code 4" in proc.stderr
+
+
+def test_concurrent_session_resolution_creates_one_session(initialized: Path) -> None:
+    """Background hooks may overlap after a branch switch: only one session per branch."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from contextbridge.storage.workspace import Workspace
+
+    git(initialized, "checkout", "-q", "-b", "race")
+    ws = Workspace.locate(initialized)
+
+    def resolve(_: int) -> str:
+        with ws.open_db() as db:
+            session, _created = ws.resolve_active_session(db, ws.load_state())
+            return session.id
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        ids = set(pool.map(resolve, range(16)))
+    assert len(ids) == 1
+    rows = _rows(initialized, "SELECT COUNT(*) AS n FROM sessions WHERE branch_name='race'")
+    assert rows[0]["n"] == 1
+
+
+def test_hook_records_large_modified_file_without_misclassifying(
+    initialized: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import contextbridge.core.git_observer as go
+
+    monkeypatch.setattr(go, "MAX_SOURCE_BYTES", 10)  # every blob counts as "too large"
+    write(initialized, "service.py", SERVICE_PY.replace("return True", "return False"))
+    commit_all(initialized)
+    cb("hook", "post-commit")
+    [change] = _changes(initialized)
+    assert change["change_type"] == "modified"
+    assert all(s["change"] == "modified" for s in change["symbols"])

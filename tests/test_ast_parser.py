@@ -344,3 +344,56 @@ def test_syntax_errors_never_crash() -> None:
     fixed = broken.replace("return 1", "return 2")
     result = symbols_for_change("m.py", broken, fixed, udiff(broken, fixed))
     assert ("ok", "modified") in [(s["name"], s["change"]) for s in result]
+
+
+# ----- review regressions -----------------------------------------------------------------
+
+PY_PROPERTY = """\
+class Cart:
+    @property
+    def total(self):
+        return self._t
+
+    @total.setter
+    def total(self, v):
+        self._t = v
+"""
+
+
+def test_setter_edit_is_reported_despite_shared_name() -> None:
+    new = PY_PROPERTY.replace("self._t = v", "self._t = max(v, 0)")
+    result = symbols_for_change("m.py", PY_PROPERTY, new, udiff(PY_PROPERTY, new))
+    assert [(s["name"], s["change"], s["signature"]) for s in result] == [
+        ("Cart.total", "modified", "def total(self, v)")
+    ]
+
+
+def test_js_accessor_pair() -> None:
+    old = "class A {\n  get x() { return this._x; }\n  set x(v) { this._x = v; }\n}\n"
+    new = old.replace("this._x = v", "this._x = v | 0")
+    assert changes("a.js", old, new) == [("A.x", "method", "modified")]
+
+
+def test_new_overload_counts_as_added() -> None:
+    old = "def f(x):\n    return x\n"
+    new = old + "\n\ndef f(x, y):\n    return x + y\n"
+    assert changes("m.py", old, new) == [("f", "function", "added")]
+
+
+SRC = "def f():\n    return 1\n\ndef g():\n    return 2\n"
+
+
+@pytest.mark.parametrize("missing", ["old", "new"])
+def test_modified_file_with_unavailable_source_is_not_added_or_removed(missing: str) -> None:
+    new = SRC.replace("return 1", "return 3")
+    patch = udiff(SRC, new).replace("@@ -1,5 +1,5 @@", "@@ -1,5 +1,5 @@ def f():")
+    old_src, new_src = (None, new) if missing == "old" else (SRC, None)
+    result = symbols_for_change("m.py", old_src, new_src, patch, change_type="modified")
+    assert [(s["name"], s["change"]) for s in result] == [("f", "modified")]
+
+
+def test_explicit_change_type_for_added_and_deleted() -> None:
+    added = symbols_for_change("m.py", None, SRC, udiff("", SRC), change_type="added")
+    assert {s["change"] for s in added} == {"added"}
+    deleted = symbols_for_change("m.py", SRC, None, udiff(SRC, ""), change_type="deleted")
+    assert {s["change"] for s in deleted} == {"removed"}

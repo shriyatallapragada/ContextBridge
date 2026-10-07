@@ -204,10 +204,13 @@ class Workspace:
             session is not None and branch != UNKNOWN_BRANCH and session.branch_name != branch
         )
         if session is None or session.status != "active" or branch_changed:
-            session = db.find_active_session(branch)
-            if session is None:
-                session = db.create_session(branch)
-                created = True
+            # Find-or-create under a write lock: background hooks can run concurrently
+            # and must not each start a session for the same branch.
+            with db.transaction():
+                session = db.find_active_session(branch)
+                if session is None:
+                    session = db.create_session(branch)
+                    created = True
         state.active_session_id = session.id
         state.active_branch = session.branch_name
         return session, created
