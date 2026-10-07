@@ -26,6 +26,15 @@ CONFIG_DIR_ENV = "CB_CONFIG_DIR"
 LLM_PROVIDERS = ("ollama", "groq", "openai", "none")
 CLOUD_PROVIDERS = ("groq", "openai")
 API_KEY_ENV = {"groq": "GROQ_API_KEY", "openai": "OPENAI_API_KEY"}
+# Used when `llm.cloud_model` is empty (the Ollama model name is not valid in the cloud).
+DEFAULT_CLOUD_MODELS = {"groq": "llama-3.1-8b-instant", "openai": "gpt-4o-mini"}
+
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a senior systems architect creating an emergency session handoff. "
+    "Summarize the completed work, modified files (with key symbols), architectural "
+    "decisions, failing tests, and current blockers into a hyper-dense, bulleted summary "
+    "under 400 tokens. Do not invent details not present in the input."
+)
 
 # Keys that must never be persisted to a config file, even if a user adds them.
 # Anchored so that settings such as `target_tokens` are not caught.
@@ -39,7 +48,11 @@ class LLMConfig:
     ollama_host: str = "http://localhost:11434"
     cloud_fallback: bool = False
     cloud_provider: str = "groq"
+    cloud_model: str = ""  # Empty: the provider's default (DEFAULT_CLOUD_MODELS).
     timeout_seconds: int = 60
+
+    def cloud_model_for(self, provider: str) -> str:
+        return self.cloud_model or DEFAULT_CLOUD_MODELS[provider]
 
 
 def _default_ignore_globs() -> list[str]:
@@ -57,6 +70,9 @@ class CaptureConfig:
 class HandoffConfig:
     target_tokens: int = 400
     hard_cap_tokens: int = 600
+    # Cap on the context sent to the model; lowest-priority content is cut first.
+    max_input_tokens: int = 12000
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT
 
 
 @dataclass
@@ -88,6 +104,12 @@ class Config:
             raise ConfigError("handoff token limits must be positive.")
         if self.handoff.target_tokens > self.handoff.hard_cap_tokens:
             raise ConfigError("handoff.target_tokens must not exceed handoff.hard_cap_tokens.")
+        if self.handoff.max_input_tokens < self.handoff.hard_cap_tokens:
+            raise ConfigError("handoff.max_input_tokens must be at least hard_cap_tokens.")
+        if self.llm.timeout_seconds <= 0:
+            raise ConfigError("llm.timeout_seconds must be positive.")
+        if not self.handoff.system_prompt.strip():
+            raise ConfigError("handoff.system_prompt must not be empty.")
         if self.capture.max_diff_chars_per_file <= 0 or self.capture.max_files_per_handoff <= 0:
             raise ConfigError("capture limits must be positive.")
 

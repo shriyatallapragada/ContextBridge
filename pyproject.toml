@@ -11,6 +11,8 @@ dependencies = [
     "platformdirs>=4.2",
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.13,<0.14",
+    "tiktoken>=0.7",
+    "ollama>=0.3",
 ]
 
 [project.optional-dependencies]
