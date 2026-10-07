@@ -31,11 +31,8 @@ def log_command(
         ws = open_workspace(ctx)
         result = sanitize_with_report(message)
         with ws.open_db() as db:
-            state = ws.load_state()
-            session, created = ws.resolve_active_session(db, state)
+            session, _ = ws.active_session(db)
             decision = db.add_decision(session.id, result.text, tag.value)
-            if created:
-                ws.save_state(state)
 
         log.info("log: stored %s tag=%s redactions=%d", decision.id, tag.value, result.total)
         console.print(f"[bold green]✓[/] Logged [yellow]{tag.value}[/] [dim]({decision.id})[/]")
