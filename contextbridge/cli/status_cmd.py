@@ -1,4 +1,4 @@
-"""`cb status`: dashboard of the active session (basic Phase 1 version)."""
+"""`cb status`: dashboard of the active session."""
 
 from __future__ import annotations
 
@@ -9,10 +9,19 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
-from contextbridge.cli.common import console, error_boundary, open_workspace
+from contextbridge.cli.common import console, error_boundary, git_observer_for, open_workspace
 from contextbridge.storage.db import DECISION_TAGS, parse_utc
+from contextbridge.synthesis.context_builder import (
+    SessionContext,
+    build_context,
+    describe_test_run,
+    format_symbols,
+)
+from contextbridge.synthesis.token_counter import APPROX_LABEL
 
 RECENT_DECISIONS = 10
+CHANGED_FILES_SHOWN = 10
+FAILURES_SHOWN = 5
 _TAG_STYLE = {
     "blocker": "bold red",
     "bug": "red",
@@ -20,6 +29,7 @@ _TAG_STYLE = {
     "todo": "yellow",
     "note": "white",
 }
+_CHANGE_STYLE = {"added": "green", "deleted": "red", "renamed": "cyan", "modified": "yellow"}
 
 
 def _age(timestamp: str) -> str:
@@ -34,43 +44,103 @@ def _age(timestamp: str) -> str:
     return f"{seconds // 86400}d {seconds % 86400 // 3600}h"
 
 
+def _test_line(context: SessionContext) -> str:
+    run = context.test_run
+    if run is None:
+        return "[dim]none (record one with `cb run -- <test command>`)[/]"
+    style = "red" if context.tests_failing else "green"
+    return f"[{style}]{escape(describe_test_run(run))}[/] [dim]{_age(run.timestamp)} ago[/]"
+
+
+def _summary(context: SessionContext, state_last: dict[str, object] | None) -> Table:
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold")
+    grid.add_column()
+    session = context.session
+    grid.add_row("Project", escape(context.project))
+    grid.add_row("Branch", f"[cyan]{escape(context.branch)}[/]")
+    grid.add_row(
+        "Session",
+        f"[magenta]{session.id}[/] ({session.status}, started {_age(session.start_time)} ago)",
+    )
+    counts: dict[str, int] = {}
+    for d in context.decisions:
+        counts[d.tag] = counts.get(d.tag, 0) + 1
+    breakdown = ", ".join(f"{t} {counts[t]}" for t in DECISION_TAGS if counts.get(t))
+    grid.add_row(
+        "Decisions", f"{len(context.decisions)}" + (f"  [dim]({breakdown})[/]" if breakdown else "")
+    )
+    grid.add_row("Commits", str(len(context.commits)))
+    uncommitted = sum(f.uncommitted for f in context.files)
+    total_files = len(context.files) + context.omitted_files
+    grid.add_row(
+        "Changed files",
+        f"{total_files}" + (f"  [dim]({uncommitted} uncommitted)[/]" if uncommitted else ""),
+    )
+    grid.add_row("Last test run", _test_line(context))
+    if state_last:
+        ratio = state_last.get("compression_ratio", "n/a")
+        grid.add_row(
+            "Last handoff",
+            escape(
+                f"{state_last.get('from')} → {state_last.get('to')} at "
+                f"{state_last.get('timestamp')} ({state_last.get('method')}, {ratio} smaller)"
+            ),
+        )
+    else:
+        grid.add_row("Last handoff", "[dim]none[/]")
+    grid.add_row("Context size", f"{context.raw_tokens:,} tokens raw [dim]({APPROX_LABEL})[/]")
+    return grid
+
+
 def status_command(ctx: typer.Context) -> None:
-    """Show the active session and its recent decisions."""
+    """Show the active session: branch, changes, symbols, decisions, tests and tokens."""
     with error_boundary():
         ws = open_workspace(ctx)
+        config = ws.load_config()
+        state = ws.load_state()
         with ws.open_db() as db:
-            state = ws.load_state()
-            session = db.get_session(state.active_session_id) if state.active_session_id else None
-            decisions = db.list_decisions(session.id, limit=RECENT_DECISIONS) if session else []
-            counts = db.count_decisions_by_tag(session.id) if session else {}
-
-        summary = Table.grid(padding=(0, 2))
-        summary.add_column(style="bold")
-        summary.add_column()
-        summary.add_row("Project", escape(state.project_name))
-        summary.add_row("Root", escape(str(ws.root)))
-        if session is None:
-            summary.add_row("Session", "[dim]none (run `cb log` or `cb init` to start one)[/]")
-        else:
-            summary.add_row("Branch", f"[cyan]{escape(session.branch_name)}[/]")
-            started = _age(session.start_time)
-            summary.add_row(
-                "Session", f"[magenta]{session.id}[/] ({session.status}, started {started} ago)"
+            session, _ = ws.active_session(db)
+            context = build_context(
+                db, session, config, project=state.project_name, observer=git_observer_for(ws)
             )
-            total = sum(counts.values())
-            breakdown = ", ".join(f"{t} {counts[t]}" for t in DECISION_TAGS if counts.get(t))
-            summary.add_row(
-                "Decisions", f"{total}" + (f"  [dim]({breakdown})[/]" if breakdown else "")
+        console.print(
+            Panel(
+                _summary(context, ws.load_state().last_handoff),
+                title="ContextBridge status",
+                border_style="blue",
             )
-        last = state.last_handoff
-        summary.add_row(
-            "Last handoff",
-            escape(f"{last.get('from')} → {last.get('to')} at {last.get('timestamp')}")
-            if last
-            else "[dim]none[/]",
         )
-        console.print(Panel(summary, title="ContextBridge status", border_style="blue"))
+        console.print(
+            f"[dim]Handoff budget: target {config.handoff.target_tokens:,}, hard cap "
+            f"{config.handoff.hard_cap_tokens:,} tokens. Preview with `cb handoff --dry-run`.[/]"
+        )
 
+        if context.files:
+            table = Table(title=f"Changed files (top {CHANGED_FILES_SHOWN})", title_justify="left")
+            table.add_column("File", no_wrap=True)
+            table.add_column("Change", no_wrap=True)
+            table.add_column("Symbols")
+            for f in context.files[:CHANGED_FILES_SHOWN]:
+                style = _CHANGE_STYLE.get(f.change_type, "white")
+                change = f"[{style}]{f.change_type}[/]" + (" [dim]*[/]" if f.uncommitted else "")
+                symbols = format_symbols(f.symbols, limit=5) if f.symbols else "[dim]—[/]"
+                table.add_row(escape(f.path), change, escape(symbols) if f.symbols else symbols)
+            console.print(table)
+            if any(f.uncommitted for f in context.files):
+                console.print("[dim]* uncommitted[/]")
+
+        run = context.test_run
+        if run is not None and run.failures and context.tests_failing:
+            console.print("[bold red]Failing tests[/]")
+            for failure in run.failures[:FAILURES_SHOWN]:
+                message = failure.get("message", "")
+                console.print(
+                    f"  • {escape(failure.get('test', '?'))}"
+                    + (f" [dim]{escape(message)}[/]" if message else "")
+                )
+
+        decisions = context.decisions[:RECENT_DECISIONS]
         if decisions:
             table = Table(title=f"Recent decisions (last {RECENT_DECISIONS})", title_justify="left")
             table.add_column("When", style="dim", no_wrap=True)
@@ -82,5 +152,5 @@ def status_command(ctx: typer.Context) -> None:
                     f"{_age(d.created_at)} ago", f"[{style}]{d.tag}[/]", escape(d.content)
                 )
             console.print(table)
-        elif session is not None:
+        else:
             console.print('[dim]No decisions logged yet. Try: cb log "..." --tag architecture[/]')

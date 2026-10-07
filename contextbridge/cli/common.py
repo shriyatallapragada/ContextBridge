@@ -11,7 +11,8 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
-from contextbridge.errors import ContextBridgeError
+from contextbridge.core.git_observer import GitObserver
+from contextbridge.errors import ContextBridgeError, NotAGitRepoError
 from contextbridge.storage.workspace import Workspace
 
 console = Console(highlight=False)
@@ -42,6 +43,14 @@ def open_workspace(ctx: typer.Context) -> Workspace:
     ws = Workspace.locate(actx.start_dir)
     ws.setup_logging(verbose=actx.verbose)
     return ws
+
+
+def git_observer_for(ws: Workspace) -> GitObserver | None:
+    """The git observer for a workspace, or None when it is not a git repository."""
+    try:
+        return GitObserver.open(ws.root)
+    except NotAGitRepoError:
+        return None
 
 
 @contextmanager

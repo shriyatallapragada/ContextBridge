@@ -385,6 +385,15 @@ class Database:
         ).fetchone()
         return row is not None
 
+    def session_commit_shas(self, session_id: str) -> list[str]:
+        """Distinct commits recorded for a session, oldest first."""
+        rows = self.conn.execute(
+            "SELECT commit_sha, MIN(rowid) AS first FROM file_changes "
+            "WHERE session_id = ? AND commit_sha IS NOT NULL GROUP BY commit_sha ORDER BY first",
+            (session_id,),
+        ).fetchall()
+        return [str(r[0]) for r in rows]
+
     def last_commit_sha(self, session_id: str) -> str | None:
         """The most recently recorded commit of a session."""
         row = self.conn.execute(
@@ -509,6 +518,38 @@ class Database:
             (session_id,),
         ).fetchone()
         return _row_to_test_run(row) if row else None
+
+
+@dataclass(frozen=True)
+class SearchHit:
+    kind: str  # "decision" | "file_change"
+    id: str
+    session_id: str
+    text: str
+    timestamp: str
+    score: float | None = None  # similarity for vector hits; None for keyword hits
+
+
+def _like_pattern(query: str) -> str:
+    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
+def keyword_search(db: Database, query: str, *, limit: int = 10) -> list[SearchHit]:
+    """Case-insensitive substring search over decisions and file changes (all sessions)."""
+    pattern = _like_pattern(query)
+    rows = db.conn.execute(
+        "SELECT 'decision' AS kind, id, session_id, '[' || tag || '] ' || content AS text, "
+        "created_at AS ts FROM decision_logs WHERE content LIKE :p ESCAPE '\\' "
+        "UNION ALL "
+        "SELECT 'file_change', id, session_id, file_path || ' ' || COALESCE(symbols_modified, '') "
+        "|| char(10) || COALESCE(diff_snippet, ''), timestamp FROM file_changes "
+        "WHERE file_path LIKE :p ESCAPE '\\' OR symbols_modified LIKE :p ESCAPE '\\' "
+        "OR diff_snippet LIKE :p ESCAPE '\\' "
+        "ORDER BY ts DESC LIMIT :n",
+        {"p": pattern, "n": limit},
+    ).fetchall()
+    return [SearchHit(kind=r[0], id=r[1], session_id=r[2], text=r[3], timestamp=r[4]) for r in rows]
 
 
 def _split_sql(script: str) -> list[str]:

@@ -9,7 +9,8 @@ from contextbridge.config import Config, global_config_path, load_config, save_c
 from contextbridge.errors import ConfigError
 
 
-def test_defaults() -> None:
+def test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CB_OLLAMA_HOST")  # set by the autouse isolation fixture
     cfg = load_config()
     assert cfg == Config()
     assert cfg.llm.provider == "ollama"

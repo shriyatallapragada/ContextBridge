@@ -13,8 +13,18 @@ def _isolate_config(
 ) -> None:
     """Never read or write the developer's real ~/.config during tests."""
     monkeypatch.setenv("CB_CONFIG_DIR", str(tmp_path_factory.mktemp("cfg")))
-    for var in ("CB_LLM_PROVIDER", "CB_LLM_MODEL", "CB_OLLAMA_HOST", "OLLAMA_HOST"):
+    for var in (
+        "CB_LLM_PROVIDER",
+        "CB_LLM_MODEL",
+        "CB_OLLAMA_HOST",
+        "OLLAMA_HOST",
+        "CB_CLOUD_FALLBACK",
+        "GROQ_API_KEY",
+        "OPENAI_API_KEY",
+    ):
         monkeypatch.delenv(var, raising=False)
+    # Never talk to a real local Ollama: port 9 (discard) refuses connections at once.
+    monkeypatch.setenv("CB_OLLAMA_HOST", "http://127.0.0.1:9")
 
 
 def _git(repo: Path, *args: str) -> None:

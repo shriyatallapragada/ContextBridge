@@ -343,6 +343,21 @@ class GitObserver:
                 status.unstaged.append(path)
         return status
 
+    def commit_infos(self, shas: list[str]) -> list[CommitInfo]:
+        """Info for specific commits, newest first; unknown SHAs are skipped."""
+        known = [
+            sha for sha in shas if self._try("cat-file", "-e", f"{sha}^{{commit}}") is not None
+        ]
+        if not known:
+            return []
+        out = self.git("log", "--no-walk=sorted", "--format=%H%x1f%cI%x1f%s%x1e", *known, "--")
+        commits = []
+        for record in out.split("\x1e"):
+            parts = record.strip("\n").split("\x1f")
+            if len(parts) == 3:
+                commits.append(CommitInfo(sha=parts[0], committed_at=parts[1], subject=parts[2]))
+        return commits
+
     def commits_since(
         self, since_iso: str, *, exclude: str | None = None, limit: int = 100
     ) -> list[CommitInfo]:
@@ -461,6 +476,48 @@ class GitObserver:
                     path=path,
                     change_type=change,
                     old_path=old_path,
+                    patch=patch[:MAX_PATCH_CHARS],
+                    snippet=truncate_diff(patch, max_diff_chars),
+                )
+            )
+        return result
+
+    def untracked_changes(self, *, ignore_globs: list[str], max_diff_chars: int) -> DiffResult:
+        """New files not yet added to git (honouring .gitignore), as ``added`` diffs."""
+        result = DiffResult()
+        for path in self.status().untracked:
+            if is_sensitive_file(path):
+                result.skipped.append(SkippedFile(path, "sensitive"))
+                continue
+            if matches_ignore(path, ignore_globs):
+                result.skipped.append(SkippedFile(path, "ignored"))
+                continue
+            target = self.root / path
+            try:
+                if target.stat().st_size > MAX_SOURCE_BYTES:
+                    result.skipped.append(SkippedFile(path, "limit"))
+                    continue
+                data = target.read_bytes()
+            except OSError:
+                continue
+            if b"\0" in data[:8192]:
+                result.skipped.append(SkippedFile(path, "binary"))
+                continue
+            lines = data.decode("utf-8", errors="replace").splitlines()
+            patch = "\n".join(
+                [
+                    f"diff --git a/{path} b/{path}",
+                    "new file (untracked)",
+                    "--- /dev/null",
+                    f"+++ b/{path}",
+                    f"@@ -0,0 +1,{len(lines)} @@",
+                    *(f"+{line}" for line in lines),
+                ]
+            )
+            result.files.append(
+                FileDiff(
+                    path=path,
+                    change_type=ChangeType.added,
                     patch=patch[:MAX_PATCH_CHARS],
                     snippet=truncate_diff(patch, max_diff_chars),
                 )
