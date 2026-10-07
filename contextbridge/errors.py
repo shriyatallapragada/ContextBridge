@@ -25,6 +25,18 @@ class UserError(ContextBridgeError):
     exit_code = EXIT_USER_ERROR
 
 
+class AdapterError(UserError):
+    """An adapter cannot read or write its target file."""
+
+
+class AdapterConflictError(AdapterError):
+    """The target file exists but was not created by ContextBridge."""
+
+
+class UnknownAgentError(UserError):
+    """The requested agent name has no adapter."""
+
+
 class EnvironmentProblemError(ContextBridgeError):
     """The environment is missing something (git, `.context/`, ...)."""
 

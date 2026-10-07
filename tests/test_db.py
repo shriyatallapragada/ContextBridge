@@ -219,3 +219,55 @@ def test_test_run_roundtrip_sanitized_and_capped(db: Database) -> None:
     assert "abc123" not in last.command
     assert all("ghp_" not in f["message"] for f in last.failures)
     assert db.last_test_run(db.create_session("other").id) is None
+
+
+def test_handoff_roundtrip_sanitized(db: Database) -> None:
+    s = db.create_session("main")
+    record = db.add_handoff(
+        s.id,
+        "claude",
+        "cursor",
+        raw_tokens=1000,
+        compressed_tokens=250,
+        method="deterministic",
+        payload="payload AKIAIOSFODNN7EXAMPLE",
+        written_path=".cursor/rules/handoff.mdc",
+    )
+    assert record.id.startswith("hand_")
+    [stored] = db.list_handoffs(s.id)
+    assert (stored.from_agent, stored.to_agent, stored.raw_token_count) == (
+        "claude",
+        "cursor",
+        1000,
+    )
+    assert stored.compressed_token_count == 250 and stored.method == "deterministic"
+    assert stored.written_path == ".cursor/rules/handoff.mdc"
+    assert "AKIAIOSFODNN7EXAMPLE" not in stored.payload_content
+    assert db.list_handoffs(db.create_session("other").id) == []
+
+
+def test_delete_all_sessions_removes_handoffs_first(db: Database) -> None:
+    s = db.create_session("main")
+    db.add_decision(s.id, "d", "note")
+    db.add_file_change(s.id, "a.py", "added", commit_sha="c1")
+    db.add_test_run(s.id, "pytest", 0, passed=1)
+    db.add_handoff(
+        s.id,
+        "a",
+        "b",
+        raw_tokens=1,
+        compressed_tokens=1,
+        method="m",
+        payload="p",
+        written_path=None,
+    )
+    assert db.count_all() == {
+        "sessions": 1,
+        "decision_logs": 1,
+        "file_changes": 1,
+        "test_runs": 1,
+        "handoffs": 1,
+    }
+    deleted = db.delete_all_sessions()  # would violate the handoffs foreign key otherwise
+    assert deleted["handoffs"] == 1 and deleted["sessions"] == 1
+    assert set(db.count_all().values()) == {0}

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from contextbridge.adapters.base_adapter import render_block
 from contextbridge.core.git_observer import (
     HOOK_END,
     HOOK_START,
@@ -336,3 +337,47 @@ def test_hook_prefers_installing_interpreter_over_cb_on_path(
     subprocess.run(["sh", str(_hook(git_repo))], cwd=git_repo, env=env, check=True)
     time.sleep(1.5)  # the hook body runs in the background
     assert not marker.exists()
+
+
+# ----- injected adapter content never counts as a change ---------------------------------
+
+
+def test_injected_block_is_stripped_from_diffs(obs: GitObserver, git_repo: Path) -> None:
+    write(git_repo, "CLAUDE.md", "# Rules\n\n- use tabs\n")
+    commit_all(git_repo)
+    block = render_block("<context_handoff>\nSECRET-PAYLOAD-LINE\n</context_handoff>")
+    # The block is added together with a real edit by the user.
+    write(git_repo, "CLAUDE.md", f"# Rules\n\n- use tabs\n- run tests\n\n{block}\n")
+    sha = commit_all(git_repo)
+    [change] = _diff(obs, sha).files
+    assert "+- run tests" in change.patch
+    assert "SECRET-PAYLOAD-LINE" not in change.patch and "contextbridge" not in change.patch
+
+
+def test_commit_that_only_adds_the_block_is_not_a_change(obs: GitObserver, git_repo: Path) -> None:
+    write(git_repo, "CLAUDE.md", "# Rules\n")
+    commit_all(git_repo)
+    write(git_repo, "CLAUDE.md", f"# Rules\n\n{render_block('payload')}\n")
+    sha = commit_all(git_repo)
+    result = _diff(obs, sha)
+    assert result.files == []
+    assert [(s.path, s.reason) for s in result.skipped] == [("CLAUDE.md", "injected")]
+
+
+def test_dedicated_adapter_files_are_never_changes(obs: GitObserver, git_repo: Path) -> None:
+    write(git_repo, "HANDOFF.md", render_block("payload") + "\n")
+    write(git_repo, ".cursor/rules/handoff.mdc", "---\nalwaysApply: true\n---\n")
+    write(git_repo, "real.py", "x = 1\n")
+    sha = commit_all(git_repo)
+    result = _diff(obs, sha)
+    assert [f.path for f in result.files] == ["real.py"]
+    assert {s.reason for s in result.skipped} == {"injected"}
+
+
+def test_untracked_injected_files(obs: GitObserver, git_repo: Path) -> None:
+    write(git_repo, "CLAUDE.md", render_block("payload only") + "\n")  # new, only our block
+    write(git_repo, "HANDOFF.md", render_block("payload") + "\n")
+    assert obs.untracked_changes(ignore_globs=IGNORE, max_diff_chars=4000).files == []
+    write(git_repo, "CLAUDE.md", f"# Mine\n\n{render_block('payload')}\n")
+    [change] = obs.untracked_changes(ignore_globs=IGNORE, max_diff_chars=4000).files
+    assert "# Mine" in change.patch and "payload" not in change.patch
