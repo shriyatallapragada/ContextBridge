@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -134,10 +135,12 @@ def test_cloud_fallback_prints_notice(session_repo: Path, monkeypatch: pytest.Mo
     assert "Sending sanitized context to groq" in result.stderr
 
 
-def test_handoff_without_dry_run_is_a_clear_user_error(session_repo: Path) -> None:
-    code, out = cb("handoff", "--from", "claude", "--to", "cursor")
+def test_handoff_without_dry_run_needs_from_and_to(session_repo: Path) -> None:
+    code, out = cb("handoff")
     assert code == 1
-    assert "not available yet" in out and "--dry-run" in out
+    assert "--from and --to" in out
+    assert cb("handoff", "--to", "cursor")[0] == 1
+    assert not (session_repo / ".cursor").exists()
 
 
 def test_handoff_secrets_never_reach_payload(session_repo: Path) -> None:
@@ -157,7 +160,7 @@ def test_handoff_requires_init(git_repo: Path) -> None:
 
 
 def test_status_dashboard(session_repo: Path) -> None:
-    cb("run", "--", "python", "-c", "import sys; sys.exit(0)")
+    cb("run", "--", sys.executable, "-c", "import sys; sys.exit(0)")
     code, out = cb("status")
     assert code == 0, out
     for needle in (
@@ -181,8 +184,6 @@ def test_status_dashboard(session_repo: Path) -> None:
 
 def test_status_shows_failing_tests(session_repo: Path) -> None:
     write(session_repo, "tests/test_x.py", "def test_bad():\n    assert 0, 'boom'\n")
-    import sys
-
     cb("run", "--", sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests")
     code, out = cb("status")
     assert code == 0

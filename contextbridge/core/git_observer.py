@@ -6,6 +6,7 @@ Handles: not a repo, detached HEAD, no commits yet, and merge/rebase in progress
 
 from __future__ import annotations
 
+import difflib
 import os
 import re
 import shlex
@@ -18,6 +19,7 @@ from enum import StrEnum
 from fnmatch import fnmatch
 from pathlib import Path
 
+from contextbridge.adapters.base_adapter import MARKER_START, remove_blocks
 from contextbridge.core.sanitizer import is_sensitive_file
 from contextbridge.errors import EnvironmentProblemError, NotAGitRepoError
 
@@ -26,6 +28,12 @@ GIT_TIMEOUT_SECONDS = 15
 MAX_PATCH_CHARS = 512_000
 # Files read for AST parsing above this size are ignored.
 MAX_SOURCE_BYTES = 1_000_000
+
+# Files ContextBridge writes whole. Never part of a session's changes, otherwise each
+# handoff would contain the previous one.
+INJECTED_FILES = ("HANDOFF.md", ".cursor/rules/handoff.mdc")
+# Files that may carry an injected block among the user's own content.
+SHARED_INJECTED_NAME = "CLAUDE.md"
 
 HOOK_NAME = "post-commit"
 HOOK_START = "# >>> contextbridge >>>"
@@ -462,6 +470,9 @@ class GitObserver:
             if matches_ignore(path, ignore_globs):
                 result.skipped.append(SkippedFile(path, "ignored"))
                 continue
+            if path in INJECTED_FILES:
+                result.skipped.append(SkippedFile(path, "injected"))
+                continue
             if len(result.files) >= max_files:
                 result.skipped.append(SkippedFile(path, "limit"))
                 continue
@@ -471,6 +482,12 @@ class GitObserver:
             if _is_binary_patch(patch):
                 result.skipped.append(SkippedFile(path, "binary"))
                 continue
+            if path.rsplit("/", 1)[-1] == SHARED_INJECTED_NAME:
+                cleaned = self._without_injected(base, target, path, old_path, patch)
+                if cleaned is None:
+                    result.skipped.append(SkippedFile(path, "injected"))
+                    continue
+                patch = cleaned
             result.files.append(
                 FileDiff(
                     path=path,
@@ -482,6 +499,30 @@ class GitObserver:
             )
         return result
 
+    def _without_injected(
+        self, base: str, target: str | None, path: str, old_path: str | None, patch: str
+    ) -> str | None:
+        """``patch`` recomputed without ContextBridge's injected block.
+
+        Returns the patch unchanged when no block is involved, or None when the block is
+        the only thing that changed (the file has no real changes to report).
+        """
+        old = self.file_at(base, old_path or path) or ""
+        new = self.file_at(target, path) or ""
+        if MARKER_START not in old and MARKER_START not in new:
+            return patch
+        old_clean, new_clean = remove_blocks(old), remove_blocks(new)
+        if old_clean == new_clean:
+            return None
+        return "".join(
+            difflib.unified_diff(
+                old_clean.splitlines(keepends=True),
+                new_clean.splitlines(keepends=True),
+                f"a/{path}",
+                f"b/{path}",
+            )
+        )
+
     def untracked_changes(self, *, ignore_globs: list[str], max_diff_chars: int) -> DiffResult:
         """New files not yet added to git (honouring .gitignore), as ``added`` diffs."""
         result = DiffResult()
@@ -491,6 +532,9 @@ class GitObserver:
                 continue
             if matches_ignore(path, ignore_globs):
                 result.skipped.append(SkippedFile(path, "ignored"))
+                continue
+            if path in INJECTED_FILES:
+                result.skipped.append(SkippedFile(path, "injected"))
                 continue
             target = self.root / path
             try:
@@ -503,7 +547,13 @@ class GitObserver:
             if b"\0" in data[:8192]:
                 result.skipped.append(SkippedFile(path, "binary"))
                 continue
-            lines = data.decode("utf-8", errors="replace").splitlines()
+            text = data.decode("utf-8", errors="replace")
+            if path.rsplit("/", 1)[-1] == SHARED_INJECTED_NAME:
+                text = remove_blocks(text)
+                if not text.strip():  # only our block: nothing of the user's
+                    result.skipped.append(SkippedFile(path, "injected"))
+                    continue
+            lines = text.splitlines()
             patch = "\n".join(
                 [
                     f"diff --git a/{path} b/{path}",

@@ -132,6 +132,20 @@ class Decision:
 
 
 @dataclass(frozen=True)
+class HandoffRecord:
+    id: str
+    session_id: str | None
+    from_agent: str
+    to_agent: str
+    raw_token_count: int | None
+    compressed_token_count: int | None
+    method: str | None
+    payload_content: str
+    written_path: str | None
+    created_at: str
+
+
+@dataclass(frozen=True)
 class FileChange:
     id: str
     session_id: str
@@ -184,6 +198,21 @@ def _row_to_decision(row: sqlite3.Row) -> Decision:
         session_id=row["session_id"],
         content=row["content"],
         tag=row["tag"],
+        created_at=row["created_at"],
+    )
+
+
+def _row_to_handoff(row: sqlite3.Row) -> HandoffRecord:
+    return HandoffRecord(
+        id=row["id"],
+        session_id=row["session_id"],
+        from_agent=row["from_agent"],
+        to_agent=row["to_agent"],
+        raw_token_count=row["raw_token_count"],
+        compressed_token_count=row["compressed_token_count"],
+        method=row["method"],
+        payload_content=row["payload_content"],
+        written_path=row["written_path"],
         created_at=row["created_at"],
     )
 
@@ -376,6 +405,85 @@ class Database:
             (session_id,),
         ).fetchall()
         return {r["tag"]: int(r["n"]) for r in rows}
+
+    # ----- handoffs --------------------------------------------------------
+
+    def add_handoff(
+        self,
+        session_id: str,
+        from_agent: str,
+        to_agent: str,
+        *,
+        raw_tokens: int,
+        compressed_tokens: int,
+        method: str,
+        payload: str,
+        written_path: str | None,
+    ) -> HandoffRecord:
+        hid = new_id("hand")
+        now = utc_now()
+        record = HandoffRecord(
+            id=hid,
+            session_id=session_id,
+            from_agent=sanitize(from_agent),
+            to_agent=sanitize(to_agent),
+            raw_token_count=raw_tokens,
+            compressed_token_count=compressed_tokens,
+            method=method,
+            payload_content=sanitize(payload),
+            written_path=sanitize(written_path) if written_path else None,
+            created_at=now,
+        )
+        try:
+            with self.transaction() as conn:
+                conn.execute(
+                    "INSERT INTO handoffs (id, session_id, from_agent, to_agent, raw_token_count, "
+                    "compressed_token_count, method, payload_content, written_path, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        record.id,
+                        record.session_id,
+                        record.from_agent,
+                        record.to_agent,
+                        record.raw_token_count,
+                        record.compressed_token_count,
+                        record.method,
+                        record.payload_content,
+                        record.written_path,
+                        record.created_at,
+                    ),
+                )
+                conn.execute("UPDATE sessions SET last_updated = ? WHERE id = ?", (now, session_id))
+        except sqlite3.IntegrityError as exc:
+            raise StorageError(f"Cannot store handoff: {exc}") from exc
+        return record
+
+    def list_handoffs(self, session_id: str | None = None) -> list[HandoffRecord]:
+        sql = "SELECT * FROM handoffs"
+        params: tuple[object, ...] = ()
+        if session_id is not None:
+            sql += " WHERE session_id = ?"
+            params = (session_id,)
+        sql += " ORDER BY created_at DESC, rowid DESC"
+        return [_row_to_handoff(r) for r in self.conn.execute(sql, params).fetchall()]
+
+    # ----- clearing --------------------------------------------------------
+
+    def count_all(self) -> dict[str, int]:
+        """Row counts of everything `cb clear --all` would delete."""
+        tables = ("sessions", "decision_logs", "file_changes", "test_runs", "handoffs")
+        return {
+            t: int(self.conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]) for t in tables
+        }
+
+    def delete_all_sessions(self) -> dict[str, int]:
+        """Delete every session and everything attached to it. Returns the counts deleted."""
+        counts = self.count_all()
+        with self.transaction() as conn:
+            # handoffs.session_id has no ON DELETE action, so they go first.
+            conn.execute("DELETE FROM handoffs")
+            conn.execute("DELETE FROM sessions")  # cascades to decisions/changes/test runs
+        return counts
 
     # ----- file changes ----------------------------------------------------
 

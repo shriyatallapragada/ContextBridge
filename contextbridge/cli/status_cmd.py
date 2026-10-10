@@ -79,12 +79,13 @@ def _summary(context: SessionContext, state_last: dict[str, object] | None) -> T
     )
     grid.add_row("Last test run", _test_line(context))
     if state_last:
-        ratio = state_last.get("compression_ratio", "n/a")
+        ratio = str(state_last.get("compression_ratio", "n/a"))
+        size = "larger than raw" if ratio.startswith("-") else f"{ratio} smaller"
         grid.add_row(
             "Last handoff",
             escape(
                 f"{state_last.get('from')} → {state_last.get('to')} at "
-                f"{state_last.get('timestamp')} ({state_last.get('method')}, {ratio} smaller)"
+                f"{state_last.get('timestamp')} ({state_last.get('method')}, {size})"
             ),
         )
     else:
