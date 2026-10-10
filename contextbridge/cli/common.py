@@ -10,6 +10,7 @@ from pathlib import Path
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 
 from contextbridge.core.git_observer import GitObserver
 from contextbridge.errors import ContextBridgeError, NotAGitRepoError
@@ -59,8 +60,9 @@ def error_boundary() -> Iterator[None]:
     try:
         yield
     except ContextBridgeError as exc:
-        err_console.print(f"[bold red]Error:[/] {exc.message}")
+        # Messages are plain text: escape them so brackets like "[gui]" are not read as markup.
+        err_console.print(f"[bold red]Error:[/] {escape(exc.message)}")
         if exc.hint:
-            err_console.print(f"[dim]{exc.hint}[/]")
+            err_console.print(f"[dim]{escape(exc.hint)}[/]")
         log.error("%s: %s", type(exc).__name__, exc.message)
         raise typer.Exit(exc.exit_code) from exc

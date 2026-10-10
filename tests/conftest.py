@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+
+# GUI tests render without a screen. Must be set before Qt is first imported.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
 @pytest.fixture(autouse=True)

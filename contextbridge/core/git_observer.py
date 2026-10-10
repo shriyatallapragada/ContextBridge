@@ -193,20 +193,38 @@ def truncate_diff(diff: str, max_chars: int) -> str:
 # ----- hook script -------------------------------------------------------------
 
 
-def hook_block() -> str:
+def is_frozen() -> bool:
+    """True when running inside a packaged app (PyInstaller)."""
+    return bool(getattr(sys, "frozen", False))
+
+
+def hook_invocation(*, frozen: bool | None = None) -> str:
+    """The shell words that run ContextBridge's CLI from a git hook.
+
+    From a source install ``sys.executable`` is a Python interpreter. Inside a packaged
+    app it is the app itself, which must be told to behave as the CLI (never open a
+    window), so it gets ``--cli``.
+    """
+    exe = shlex.quote(sys.executable)
+    if frozen if frozen is not None else is_frozen():
+        return f"{exe} --cli"
+    return f"{exe} -m contextbridge.main"
+
+
+def hook_block(*, frozen: bool | None = None) -> str:
     """The shell snippet placed between the marker lines.
 
     Runs in the background, discards output and never fails the commit. Uses the
-    interpreter that ran `cb init` first, so an unrelated or older `cb` on PATH cannot
-    take over; falls back to `cb` on PATH if that interpreter is gone.
+    interpreter (or app) that ran `cb init` first, so an unrelated or older `cb` on PATH
+    cannot take over; falls back to `cb` on PATH if that is gone.
     """
-    python = shlex.quote(sys.executable)
+    exe = shlex.quote(sys.executable)
     return "\n".join(
         [
             HOOK_START,
             "# Installed by `cb init`; remove with `cb init --uninstall-hooks`.",
             "(",
-            f"  if [ -x {python} ] && {python} -m contextbridge.main hook post-commit; then :",
+            f"  if [ -x {exe} ] && {hook_invocation(frozen=frozen)} hook post-commit; then :",
             "  elif command -v cb >/dev/null 2>&1; then cb hook post-commit; fi",
             ") >/dev/null 2>&1 &",
             HOOK_END,

@@ -11,34 +11,11 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
-from contextbridge.adapters.base_adapter import MAX_ACTIVE_FILES, BaseAdapter
-from contextbridge.adapters.registry import get_adapter, resolve_name
-from contextbridge.cli.common import (
-    console,
-    err_console,
-    error_boundary,
-    git_observer_for,
-    log,
-    open_workspace,
-)
-from contextbridge.core.sanitizer import sanitize
-from contextbridge.errors import UnknownAgentError, UserError
-from contextbridge.storage.db import utc_now
-from contextbridge.synthesis.compressor import DETERMINISTIC, Handoff, build_handoff, format_ratio
-from contextbridge.synthesis.context_builder import build_context
+from contextbridge.cli.common import console, err_console, error_boundary, log, open_workspace
+from contextbridge.errors import UserError
+from contextbridge.service import ProjectService
+from contextbridge.synthesis.compressor import DETERMINISTIC, Handoff, format_ratio
 from contextbridge.synthesis.token_counter import APPROX_LABEL
-
-MAX_LABEL_CHARS = 40
-
-
-def _from_label(name: str | None) -> str | None:
-    """The agent being left. Free text: it may be an agent we have no adapter for."""
-    if not name or not name.strip():
-        return None
-    try:
-        return resolve_name(name)
-    except UnknownAgentError:
-        return sanitize(name.strip().lower())[:MAX_LABEL_CHARS]
 
 
 def _stats_table(handoff: Handoff, cap: int, target: str | None) -> Table:
@@ -96,35 +73,16 @@ def handoff_command(
                 hint="Example: cb handoff --from claude --to cursor  (add --dry-run to preview).",
             )
         ws = open_workspace(ctx)
-        config = ws.load_config()
-        # Validate the target before doing any work, so a typo fails instantly.
-        adapter: BaseAdapter | None = (
-            get_adapter(to_agent, ws.root, force=force) if to_agent else None
-        )
-        from_label = _from_label(from_agent)
-
-        with ws.open_db() as db:
-            session, _ = ws.active_session(db)
-            context = build_context(
-                db,
-                session,
-                config,
-                project=ws.load_state().project_name,
-                observer=git_observer_for(ws),
-            )
+        service = ProjectService(ws.root)
 
         def notify(message: str) -> None:
             err_console.print(f"[yellow]cb:[/] {escape(message)}")
 
-        handoff = build_handoff(
-            context,
-            config,
-            from_agent=from_label,
-            to_agent=adapter.name if adapter else None,
-            no_llm=no_llm,
-            notify=notify,
+        prepared = service.prepare_handoff(
+            from_agent, to_agent, use_llm=not no_llm, force=force, notify=notify
         )
-        cap = config.handoff.hard_cap_tokens
+        handoff, adapter = prepared.handoff, prepared.adapter
+        cap = ws.load_config().handoff.hard_cap_tokens
         target = adapter.relative_path if adapter else None
         out = err_console if print_only else console
 
@@ -148,42 +106,9 @@ def handoff_command(
             out.print(_stats_table(handoff, cap, f"{target} (not written)" if target else None))
             return
 
+        committed = service.commit_handoff(prepared)
+        written, from_label = committed.written, prepared.from_label
         assert adapter is not None and from_label is not None
-        active_files = [f.path for f in context.files[:MAX_ACTIVE_FILES]]
-        written = adapter.inject_payload(handoff.payload, active_files)
-        ratio = format_ratio(handoff.compression_ratio)
-        with ws.open_db() as db:
-            record = db.add_handoff(
-                session.id,
-                from_label,
-                adapter.name,
-                raw_tokens=handoff.raw_tokens,
-                compressed_tokens=handoff.compressed_tokens,
-                method=handoff.method,
-                payload=handoff.payload,
-                written_path=adapter.relative_path,
-            )
-            state = ws.load_state()
-            state.last_handoff = {
-                "timestamp": utc_now(),
-                "from": from_label,
-                "to": adapter.name,
-                "raw_tokens": handoff.raw_tokens,
-                "compressed_tokens": handoff.compressed_tokens,
-                "compression_ratio": ratio,
-                "method": handoff.method,
-            }
-            ws.save_state(state)
-        log.info(
-            "handoff: %s %s -> %s wrote %s method=%s raw=%d compressed=%d",
-            record.id,
-            from_label,
-            adapter.name,
-            adapter.relative_path,
-            handoff.method,
-            handoff.raw_tokens,
-            handoff.compressed_tokens,
-        )
         if print_only:
             typer.echo(handoff.payload, nl=False)
         out.print(

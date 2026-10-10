@@ -5,7 +5,24 @@ what you did (decisions, commits, changed functions, test runs), compresses it i
 short handoff, and writes it where the next agent (Claude Code, Cursor, Aider, ...) will
 read it.
 
-> Status: all four phases are built. See `contextbridge_spec.md` for the design.
+> Status: the command line and a desktop app are both built. See `contextbridge_spec.md` for
+> the design and `docs/ARCHITECTURE.md` for how it works.
+
+## The desktop app (no terminal needed)
+
+If you'd rather click than type, there's a friendly desktop app with the same features:
+
+- **Home**: where things stand, at a glance
+- **Notes**: write down decisions, problems and to-dos
+- **Changes**: the files and functions you've changed, and a button to run your tests
+- **Hand off**: pick who's taking over (Claude Code, Cursor, or another tool), preview the
+  summary in plain words, and write it
+- **Settings**: AI on or off, automatic commit notes, and a clearly marked "start fresh" area
+
+Open it with `cb gui` or `contextbridge-gui` (install with `uv tool install 'contextbridge[gui]'`),
+or build a double-click app with `uv run python scripts/build_app.py`
+(see [docs/PACKAGING.md](docs/PACKAGING.md)). It works fully offline and never needs an AI.
+Artwork can be swapped without touching code: see [docs/GUI_ASSETS.md](docs/GUI_ASSETS.md).
 
 ## Install
 
@@ -15,8 +32,8 @@ uv tool install .          # puts `cb` on your PATH
 uv sync --all-extras && uv run cb --help
 ```
 
-Requires Python 3.11+ and `git`. Optional extras: `vector` (semantic search),
-`cloud` (Groq/OpenAI).
+Requires Python 3.11+ and `git`. Optional extras: `gui` (the desktop app), `vector`
+(semantic search), `cloud` (Groq/OpenAI), `build` (make the standalone app).
 
 ## 5-minute quickstart
 

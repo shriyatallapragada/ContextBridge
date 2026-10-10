@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 from contextbridge.main import app
@@ -189,3 +190,17 @@ def test_version_and_help() -> None:
     assert code == 0
     for name in ("init", "log", "status"):
         assert name in out
+
+
+def test_error_messages_with_brackets_are_printed_literally(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Rich markup in an error must not swallow text like `[gui]` (regression)."""
+    import contextbridge.cli.common as common
+    from contextbridge.errors import UserError
+
+    with pytest.raises(typer.Exit), common.error_boundary():
+        raise UserError("bad [bold]value[/]", hint="try: pip install 'contextbridge[gui]'")
+    err = capsys.readouterr().err
+    assert "bad [bold]value[/]" in err
+    assert "pip install 'contextbridge[gui]'" in err

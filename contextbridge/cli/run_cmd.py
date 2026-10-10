@@ -8,9 +8,9 @@ import typer
 from rich.markup import escape
 
 from contextbridge.cli.common import app_context, err_console, log
-from contextbridge.core.shell_listener import parse_output, run_command, unknown_output_failure
+from contextbridge.core.shell_listener import parse_output, run_command
 from contextbridge.errors import ContextBridgeError
-from contextbridge.storage.workspace import Workspace
+from contextbridge.service import ProjectService
 
 
 def run_cmd_command(
@@ -27,28 +27,8 @@ def run_cmd_command(
     result = run_command(command, cwd=actx.start_dir)
     report = parse_output(command, result.output)
     try:
-        ws = Workspace.locate(actx.start_dir)
-        ws.setup_logging(verbose=actx.verbose)
-        failures = report.failures if report.recognized else unknown_output_failure(result)
-        with ws.open_db() as db:
-            session, _ = ws.active_session(db)
-            run = db.add_test_run(
-                session.id,
-                shlex.join(command),
-                result.exit_code,
-                passed=report.passed,
-                failed=report.failed,
-                skipped=report.skipped,
-                failures=failures,
-            )
-        log.info(
-            "run: %s exit=%d runner=%s passed=%s failed=%s",
-            run.id,
-            result.exit_code,
-            report.runner,
-            report.passed,
-            report.failed,
-        )
+        service = ProjectService.for_path(actx.start_dir)
+        service.record_test_run(shlex.join(command), result, report)
         if report.recognized:
             summary = f"{report.passed if report.passed is not None else '?'} passed, " + (
                 f"{report.failed} failed, {report.skipped} skipped"

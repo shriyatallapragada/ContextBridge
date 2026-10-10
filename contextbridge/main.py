@@ -9,6 +9,7 @@ import typer
 from contextbridge import __version__
 from contextbridge.cli.clear_cmd import clear_command
 from contextbridge.cli.common import AppContext, console
+from contextbridge.cli.gui_cmd import gui_command
 from contextbridge.cli.handoff_cmd import handoff_command
 from contextbridge.cli.hook_cmd import hook_app
 from contextbridge.cli.init_cmd import init_command
@@ -58,6 +59,7 @@ app.command("run", context_settings={"ignore_unknown_options": True})(run_cmd_co
 app.command("handoff")(handoff_command)
 app.command("search")(search_command)
 app.command("clear")(clear_command)
+app.command("gui")(gui_command)
 app.add_typer(hook_app, name="hook")
 
 

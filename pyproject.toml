@@ -18,6 +18,8 @@ dependencies = [
 [project.optional-dependencies]
 vector = ["chromadb>=0.5"]
 cloud = ["openai>=1.30", "groq>=0.9"]
+gui = ["PySide6-Essentials>=6.12,<6.13"]
+build = ["pyinstaller>=6.22,<7"]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
@@ -27,6 +29,9 @@ dev = [
 
 [project.scripts]
 cb = "contextbridge.main:run"
+
+[project.gui-scripts]
+contextbridge-gui = "contextbridge.gui.app:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -42,6 +47,10 @@ extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+# UI text and stylesheet strings read better unwrapped.
+"contextbridge/gui/**" = ["E501"]
 
 [tool.ruff.lint.flake8-bugbear]
 extend-immutable-calls = ["typer.Option", "typer.Argument"]

@@ -479,3 +479,32 @@ $ cb clear --cleanup-adapters              -> CLAUDE.md is byte-identical to bef
 - **Per-commit attribution.** Merge commits record the first-parent diff, and commits made during a rebase are picked up late, on the next commit.
 - **`handed_off` is defined but unused.** Sessions stay active after a handoff, on purpose.
 - **Roadmap features aren't built**: the MCP server, more agent adapters, auto-trigger on rate limits, and encrypted export.
+
+---
+
+## 18. The desktop app
+
+A PySide6 (Qt) app that does everything the command line does, for people who'd rather click.
+It lives in `contextbridge/gui/` and is deliberately thin.
+
+- **`service.py`** is the one place operations live: set up a project, read a dashboard
+  snapshot, add a note, run tests, prepare and commit a handoff, clear data. It returns plain
+  data, never prints, and never imports Qt or Typer. The CLI commands call it too, so the two
+  front ends can't drift apart. A handoff is **prepared** (built, nothing written) and then
+  **committed** (written and recorded), so what you preview is exactly what is written.
+- **Screens** (`gui/pages/`): Home, Notes, Changes, Hand off, Settings, plus a Welcome screen.
+  Each is built from the small widgets in `widgets.py`. User-facing wording ("notes",
+  "words", "functions") lives in `wording.py`, so the technical terms never leak.
+- **Never freezes**: git, tests and AI calls run on a thread pool (`workers.py`). Results come
+  back through an object that lives on the interface thread, so callbacks always run there.
+  Stale refreshes are ignored by a ticket counter.
+- **Look**: `theme.py` holds the four swatch colours, every derived tint, and the stylesheet.
+  A test checks that every text and background pair meets WCAG AA contrast (4.5:1).
+- **Artwork**: `assets.py` draws placeholder illustrations, icons and the app icon, and uses
+  a designer's `<name>.svg` from `gui/assets/` instead whenever one exists (`docs/GUI_ASSETS.md`).
+- **Packaging**: `packaging/ContextBridge.spec` and `scripts/build_app.py` produce a standalone
+  app. In a packaged app `sys.executable` is the app, not Python, so the git hook runs it as
+  `<app> --cli hook post-commit`. That mode behaves like `cb` and never opens a window
+  (`docs/PACKAGING.md`).
+- **Choices**: AI is "Smart" (use Ollama if running, else a template) or "Template only".
+  Cloud providers stay command-line only, so no API key is ever typed into or stored by the app.

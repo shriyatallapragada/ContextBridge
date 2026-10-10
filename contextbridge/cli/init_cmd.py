@@ -10,7 +10,8 @@ from rich.markup import escape
 from contextbridge.cli.common import app_context, console, error_boundary, log
 from contextbridge.core.git_observer import GitObserver, HookAction, HookResult
 from contextbridge.errors import NotAGitRepoError
-from contextbridge.storage.workspace import Workspace, ensure_gitignored, find_project_root
+from contextbridge.service import ProjectService
+from contextbridge.storage.workspace import find_project_root
 
 _INSTALL_MESSAGES = {
     HookAction.created: "Installed git post-commit hook",
@@ -70,39 +71,24 @@ def init_command(
         if uninstall_hooks:
             _uninstall_hooks(root)
             return
-        ws, created_dir = Workspace.create(root)
-        ws.setup_logging(verbose=actx.verbose)
-        ws.load_config()  # Fail early on an invalid config file.
+        result = ProjectService(root).init(install_hook=not no_hooks, verbose=actx.verbose)
 
-        gitignore_changed = ensure_gitignored(root)
-        # Migrate explicitly (not on open) so we can report what was applied.
-        with ws.open_db(migrate=False) as db:
-            migrations = db.migrate()
-            schema_version = db.schema_version
-            state = ws.load_state()
-            session, created_session = ws.resolve_active_session(db, state)
-            ws.save_state(state)
-
-        log.info("init: root=%s session=%s", root, session.id)
-        verb = "Initialized" if created_dir else "Already initialized"
-        console.print(f"[bold green]✓[/] {verb} ContextBridge in [cyan]{ws.context_dir}[/]")
-        if gitignore_changed:
-            console.print("  • Added [cyan].context/[/] to .gitignore")
-        if migrations:
-            console.print(f"  • Database schema at v{schema_version}")
-        session_verb = "Started" if created_session else "Resumed"
+        verb = "Initialized" if result.created_dir else "Already initialized"
         console.print(
-            f"  • {session_verb} session [magenta]{session.id}[/] "
-            f"on branch [cyan]{session.branch_name}[/]"
+            f"[bold green]✓[/] {verb} ContextBridge in [cyan]{result.workspace.context_dir}[/]"
         )
-        if no_hooks:
+        if result.gitignore_changed:
+            console.print("  • Added [cyan].context/[/] to .gitignore")
+        if result.migrations:
+            console.print(f"  • Database schema at v{result.schema_version}")
+        session_verb = "Started" if result.created_session else "Resumed"
+        console.print(
+            f"  • {session_verb} session [magenta]{result.session.id}[/] "
+            f"on branch [cyan]{result.session.branch_name}[/]"
+        )
+        if result.hook_skipped == "no-hooks":
             console.print("  • [dim]Git hooks: skipped (--no-hooks)[/]")
-            return
-        try:
-            observer = GitObserver.open(root)
-        except NotAGitRepoError:
+        elif result.hook_skipped == "not-a-git-repo":
             console.print("  • [dim]Git hooks: skipped (not a git repository)[/]")
-            return
-        result = observer.install_hook()
-        log.info("init: hook %s at %s", result.action.value, result.path)
-        _report_install(result)
+        elif result.hook is not None:
+            _report_install(result.hook)
