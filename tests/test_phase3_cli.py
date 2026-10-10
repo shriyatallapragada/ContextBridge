@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -159,7 +160,7 @@ def test_handoff_requires_init(git_repo: Path) -> None:
 
 
 def test_status_dashboard(session_repo: Path) -> None:
-    cb("run", "--", "python", "-c", "import sys; sys.exit(0)")
+    cb("run", "--", sys.executable, "-c", "import sys; sys.exit(0)")
     code, out = cb("status")
     assert code == 0, out
     for needle in (
@@ -183,8 +184,6 @@ def test_status_dashboard(session_repo: Path) -> None:
 
 def test_status_shows_failing_tests(session_repo: Path) -> None:
     write(session_repo, "tests/test_x.py", "def test_bad():\n    assert 0, 'boom'\n")
-    import sys
-
     cb("run", "--", sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "tests")
     code, out = cb("status")
     assert code == 0

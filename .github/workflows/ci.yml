@@ -13,6 +13,10 @@ jobs:
     name: ${{ matrix.os }} / py${{ matrix.python }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    env:
+      # The repo pins .python-version (3.12). Without this, `uv run` would discard the
+      # matrix interpreter's environment and silently rebuild it on 3.12 without extras.
+      UV_PYTHON: ${{ matrix.python }}
     strategy:
       fail-fast: false
       matrix:
@@ -26,7 +30,10 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --all-extras --python ${{ matrix.python }}
+        run: uv sync --all-extras
+
+      - name: Show interpreter
+        run: uv run python --version
 
       - name: Lint
         run: uv run ruff check . && uv run ruff format --check .

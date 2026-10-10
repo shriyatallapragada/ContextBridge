@@ -102,8 +102,16 @@ def test_full_workflow(project: Path) -> None:
 
     # status reflects everything captured so far
     status = cb(repo, "status").stdout
-    for needle in ("integer cents", "Empty cart crashes", "Cart.total", "1 passed, 1 failed"):
+    # (The test counts are asserted from the database below: the status panel wraps the
+    # long command line, so its text depends on the width of the interpreter path.)
+    for needle in ("integer cents", "Empty cart crashes", "Cart.total", "Last test run"):
         assert needle in status, needle
+    conn = sqlite3.connect(repo / ".context" / "state.db")
+    try:
+        run = conn.execute("SELECT passed, failed, skipped FROM test_runs").fetchall()
+    finally:
+        conn.close()
+    assert run == [(1, 1, 0)]
 
     # a dry run previews and writes nothing
     dry = cb(repo, "handoff", "--dry-run", "--from", "claude", "--to", "cursor")
