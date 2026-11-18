@@ -1,165 +1,140 @@
-"""LLM client routing and error mapping (SDKs are mocked; no network)."""
+"""The provider module and its older compatibility imports work without model SDKs."""
 
-from __future__ import annotations
-
-import sys
-import types
-from typing import Any
+import json
 
 import httpx
-import ollama
 import pytest
 
 from contextbridge.config import Config
-from contextbridge.synthesis.llm_client import (
-    CloudClient,
-    LLMClientError,
-    LLMTimeoutError,
-    LLMUnavailableError,
-    OllamaClient,
-    candidates,
-)
+from contextbridge.providers import candidates, create_provider
+from contextbridge.providers.base import ProviderError, ProviderTimeout, ProviderUnavailable
+from contextbridge.providers.http import HTTPProvider
+from contextbridge.synthesis.llm_client import CloudClient, OllamaClient
 
 
-def _providers(cfg: Config, **kw: Any) -> list[tuple[str, str]]:
-    return [(c.provider, c.model) for c in candidates(cfg, **kw)]
+def test_default_and_none_make_no_requests():
+    assert candidates(Config()) == []
+    assert create_provider(Config()).generate("hello") == ""
 
 
-def test_default_routing_is_ollama_only() -> None:
-    assert _providers(Config()) == [("ollama", "qwen2.5-coder:7b")]
-
-
-def test_cloud_fallback_needs_flag_and_key(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_routing_preserves_explicit_legacy_choices(monkeypatch):
     cfg = Config()
+    cfg.llm.provider = "ollama"
+    assert [provider.provider for provider in candidates(cfg)] == ["ollama"]
     cfg.llm.cloud_fallback = True
-    assert _providers(cfg) == [("ollama", "qwen2.5-coder:7b")]  # no key yet
-    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
-    assert _providers(cfg) == [("ollama", "qwen2.5-coder:7b"), ("groq", "llama-3.1-8b-instant")]
-    cfg.llm.cloud_fallback = False
-    assert _providers(cfg) == [("ollama", "qwen2.5-coder:7b")]
-
-
-def test_direct_cloud_provider_and_model_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    cfg = Config()
+    assert [provider.provider for provider in candidates(cfg)] == ["ollama", "groq"]
     cfg.llm.provider = "openai"
-    assert _providers(cfg) == []  # no key: nothing to try
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    assert _providers(cfg) == [("openai", "gpt-4o-mini")]
-    cfg.llm.cloud_model = "my-model"
-    assert _providers(cfg) == [("openai", "my-model")]
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    provider = create_provider(cfg)
+    assert provider.model == "gpt-4o-mini"
+    assert candidates(cfg, no_llm=True) == []
 
 
-def test_no_llm_and_none_provider() -> None:
-    assert _providers(Config(), no_llm=True) == []
-    cfg = Config()
-    cfg.llm.provider = "none"
-    assert _providers(cfg) == []
+def test_ollama_explicit_context_size_and_structured_schema(monkeypatch):
+    calls = []
+
+    def request(self, path, body):
+        calls.append((path, body))
+        return {"message": {"content": '{"value": 7}'}}
+
+    monkeypatch.setattr(HTTPProvider, "request", request)
+    provider = OllamaClient("http://localhost:11434", "local-model", 2)
+    schema = {"type": "object", "properties": {"value": {"type": "integer"}}, "required": ["value"]}
+    assert json.loads(provider.generate("task", schema)) == {"value": 7}
+    assert calls[0][1]["options"]["num_ctx"] == 16384
+    assert calls[0][1]["format"] == schema
+    assert not provider.is_cloud
 
 
-# ----- Ollama error mapping ---------------------------------------------------------------
+def test_compatible_endpoint_and_schema(monkeypatch):
+    calls = []
+
+    def request(self, path, body):
+        calls.append((path, body))
+        return {"choices": [{"message": {"content": '{"value": 7}'}}]}
+
+    monkeypatch.setattr(HTTPProvider, "request", request)
+    provider = HTTPProvider("user-model", "https://example.test/v1", api_key="private-key")
+    schema = {"type": "object"}
+    provider.generate("task", schema)
+    assert calls[0][0] == "/chat/completions"
+    assert calls[0][1]["response_format"]["json_schema"]["schema"] == schema
+    assert "private-key" not in repr(provider)
+    assert CloudClient("groq", "model", "key", 2).is_cloud
 
 
-class _FakeOllama:
-    def __init__(self, exc: Exception | None = None, reply: str = "ok") -> None:
-        self.exc, self.reply = exc, reply
-        self.kwargs: dict[str, Any] = {}
-
-    def __call__(self, host: str, timeout: float) -> _FakeOllama:
-        self.kwargs = {"host": host, "timeout": timeout}
-        return self
-
-    def chat(self, **kwargs: Any) -> Any:
-        self.kwargs.update(kwargs)
-        if self.exc is not None:
-            raise self.exc
-        return types.SimpleNamespace(message=types.SimpleNamespace(content=self.reply))
+def test_invalid_structured_response_is_rejected(monkeypatch):
+    monkeypatch.setattr(
+        HTTPProvider, "request", lambda *_args: {"message": {"content": '{"value":"wrong"}'}}
+    )
+    with pytest.raises(ProviderError, match="invalid structured"):
+        OllamaClient("http://localhost:11434", "m", 2).generate(
+            "task", {"type": "object", "properties": {"value": {"type": "integer"}}}
+        )
 
 
-def test_ollama_unreachable_for_real() -> None:
-    """Port 9 refuses connections: the real client error maps to LLMUnavailableError."""
-    with pytest.raises(LLMUnavailableError, match="not reachable"):
-        OllamaClient("http://127.0.0.1:9", "m", 2).complete("s", "u", max_tokens=10)
+@pytest.mark.parametrize("status", [401, 404, 429, 500])
+def test_http_failures_do_not_expose_response_body_or_key(monkeypatch, status):
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(status, text="server echoed private-key")
+    )
+    original = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: original(transport=transport, **kwargs))
+    provider = HTTPProvider("model", "https://example.test/v1", api_key="private-key")
+    with pytest.raises(ProviderUnavailable) as error:
+        provider.generate("task")
+    assert "private-key" not in str(error.value)
+
+
+def test_timeout_and_missing_ollama_fall_back(monkeypatch):
+    original = httpx.Client
+
+    def timeout(request):
+        raise httpx.ReadTimeout("private request details")
+
+    monkeypatch.setattr(
+        httpx, "Client", lambda **kwargs: original(transport=httpx.MockTransport(timeout), **kwargs)
+    )
+    with pytest.raises(ProviderTimeout, match="timed out"):
+        OllamaClient("http://localhost:11434", "m", 2).generate("task")
+
+
+def test_missing_api_key_never_sends_a_request(monkeypatch):
+    monkeypatch.setattr(HTTPProvider, "request", lambda *_args: pytest.fail("request sent"))
+    with pytest.raises(ProviderUnavailable, match="No API key"):
+        HTTPProvider("m", "https://example.test/v1").generate("task")
 
 
 @pytest.mark.parametrize(
-    ("exc", "expected", "match"),
-    [
-        (httpx.ReadTimeout("slow"), LLMTimeoutError, "timed out"),
-        (ollama.ResponseError("model not found", 404), LLMUnavailableError, "ollama pull"),
-        (ollama.ResponseError("boom", 500), LLMClientError, "boom"),
-        (httpx.RemoteProtocolError("bad"), LLMUnavailableError, "RemoteProtocolError"),
-    ],
+    "failure", ["missing-key", "missing-model", "rate-limit", "timeout", "schema"]
 )
-def test_ollama_error_mapping(
-    monkeypatch: pytest.MonkeyPatch, exc: Exception, expected: type[Exception], match: str
-) -> None:
-    monkeypatch.setattr(ollama, "Client", _FakeOllama(exc))
-    with pytest.raises(expected, match=match):
-        OllamaClient("http://h", "m", 5).complete("s", "u", max_tokens=10)
+def test_provider_failure_preserves_the_engine_template(tmp_path, monkeypatch, failure):
+    from contextbridge.service import ProjectService
 
+    service = ProjectService(tmp_path)
+    service.init(install_hook=False)
+    service.add_note("Goal: Build an offline Flutter lab helper")
+    config = Config()
+    config.llm.provider = "openai-compatible"
+    config.llm.base_url = "https://example.test/v1"
+    if failure != "missing-key":
+        monkeypatch.setenv("CB_API_KEY", "test-only-key")
 
-def test_ollama_passes_timeout_model_and_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = _FakeOllama(reply="- summary")
-    monkeypatch.setattr(ollama, "Client", fake)
-    assert (
-        OllamaClient("http://h:1", "qwen", 7).complete("sys", "usr", max_tokens=99) == "- summary"
+    def respond(request):
+        if failure == "timeout":
+            raise httpx.ReadTimeout("private request details")
+        status = {"missing-model": 404, "rate-limit": 429}.get(failure, 200)
+        return httpx.Response(status, json={"choices": [{"message": {"content": '{"lines":123}'}}]})
+
+    original = httpx.Client
+    monkeypatch.setattr(
+        httpx, "Client", lambda **kwargs: original(transport=httpx.MockTransport(respond), **kwargs)
     )
-    assert fake.kwargs["timeout"] == 7 and fake.kwargs["model"] == "qwen"
-    assert fake.kwargs["options"]["num_predict"] == 99
-    assert [m["role"] for m in fake.kwargs["messages"]] == ["system", "user"]
+    from contextbridge.synthesis.compressor import compress
 
-
-# ----- cloud error mapping --------------------------------------------------------------------
-
-
-def _fake_sdk(monkeypatch: pytest.MonkeyPatch, name: str, exc: Exception | None) -> None:
-    def create(**kwargs: Any) -> Any:
-        if exc is not None:
-            raise exc
-        msg = types.SimpleNamespace(content="- cloud summary")
-        return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg)])
-
-    client = types.SimpleNamespace(
-        chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create))
-    )
-    module = types.ModuleType(name)
-    setattr(module, "Groq" if name == "groq" else "OpenAI", lambda **kw: client)
-    monkeypatch.setitem(sys.modules, name, module)
-
-
-class APITimeoutError(Exception):
-    pass
-
-
-class APIConnectionError(Exception):
-    pass
-
-
-@pytest.mark.parametrize("provider", ["groq", "openai"])
-def test_cloud_success(monkeypatch: pytest.MonkeyPatch, provider: str) -> None:
-    _fake_sdk(monkeypatch, provider, None)
-    client = CloudClient(provider, "m", "key", 5)
-    assert client.is_cloud
-    assert client.complete("s", "u", max_tokens=10) == "- cloud summary"
-
-
-@pytest.mark.parametrize(
-    ("exc", "expected"),
-    [
-        (APITimeoutError(), LLMTimeoutError),
-        (APIConnectionError(), LLMUnavailableError),
-        (ValueError("x"), LLMClientError),
-    ],
-)
-def test_cloud_error_mapping(
-    monkeypatch: pytest.MonkeyPatch, exc: Exception, expected: type[Exception]
-) -> None:
-    _fake_sdk(monkeypatch, "groq", exc)
-    with pytest.raises(expected):
-        CloudClient("groq", "m", "key", 5).complete("s", "u", max_tokens=10)
-
-
-def test_cloud_sdk_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "groq", None)  # import groq -> ImportError
-    with pytest.raises(LLMUnavailableError, match=r"contextbridge\[cloud\]"):
-        CloudClient("groq", "m", "key", 5).complete("s", "u", max_tokens=10)
+    context = service.snapshot().context
+    offline = compress(context, config, summary_budget=1500, no_llm=True)
+    result = compress(context, config, summary_budget=1500)
+    assert result.method == "deterministic" and result.summary == offline.summary
+    assert result.attempts
+    assert "test-only-key" not in str(result.attempts)

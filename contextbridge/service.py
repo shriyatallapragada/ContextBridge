@@ -720,22 +720,10 @@ class ChatService:
 
 def check_ollama(host: str, model: str) -> OllamaCheck:
     """Is Ollama running, and does it have ``model``? Never raises."""
-    try:
-        import ollama
+    from contextbridge.providers.settings import ProviderSettingsService
 
-        listing = ollama.Client(host=host, timeout=OLLAMA_CHECK_TIMEOUT).list()
-        names = {m.model for m in listing.models if m.model}
-    except ConnectionError:
-        return OllamaCheck(False, "Ollama isn't running. Open the Ollama app, then try again.")
-    except Exception as exc:
-        return OllamaCheck(False, f"Couldn't talk to Ollama ({type(exc).__name__}).")
-    wanted = {model, f"{model}:latest"}
-    if names & wanted:
-        return OllamaCheck(True, f"Ollama is running and {model} is ready.")
-    return OllamaCheck(
-        False,
-        f"Ollama is running, but {model} isn't installed yet. Install it with: ollama pull {model}",
-    )
+    result = ProviderSettingsService().check("ollama", model, host)
+    return OllamaCheck(result.ok, result.message)
 
 
 __all__ = [

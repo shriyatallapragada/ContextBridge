@@ -10,9 +10,10 @@ from contextbridge.errors import UserError
 
 
 def _command(read: bool) -> list[str]:
-    if sys.platform == "darwin":
+    platform = str(sys.platform)
+    if platform == "darwin":
         return ["pbpaste" if read else "pbcopy"]
-    if sys.platform == "win32":
+    if platform == "win32":
         script = (
             "Get-Clipboard -Raw" if read else "Set-Clipboard -Value ([Console]::In.ReadToEnd())"
         )

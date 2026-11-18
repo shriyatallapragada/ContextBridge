@@ -214,7 +214,6 @@ def _polish(
     # Cosmetic edits can normalize spacing and final sentence punctuation.
     lines = summary.splitlines()
     editable = [line for line in lines if line.startswith("- ")]
-    prompt = json.dumps({"lines": editable}, ensure_ascii=False)
     system = (
         "Polish spacing and final punctuation of these handoff lines. Preserve every word, "
         "number, path, negation and their order. Only a final sentence period may be added. "
@@ -224,7 +223,15 @@ def _polish(
     )
     for attempt in range(2):
         try:
-            raw = client.complete(system, prompt, max_tokens=budget * 2)
+            raw = client.generate(
+                json.dumps({"instruction": system, "lines": editable}),
+                schema={
+                    "type": "object",
+                    "properties": {"lines": {"type": "array", "items": {"type": "string"}}},
+                    "required": ["lines"],
+                    "additionalProperties": False,
+                },
+            )
             rewritten = json.loads(clean_output(raw))["lines"]
             if not isinstance(rewritten, list) or len(rewritten) != len(editable):
                 raise ValueError("line count changed")

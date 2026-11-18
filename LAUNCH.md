@@ -17,4 +17,4 @@ uv run python scripts/build_app.py
 
 ## AI summaries
 
-Ollama is optional. With the default settings, ContextBridge tries Ollama and falls back to its built-in offline summary if Ollama or the configured model is unavailable. No API key or Ollama installation is needed to launch or use the app. Install and run Ollama only if you want AI generated summaries.
+The first-run screen defaults to offline mode and explains that no model or API key is needed. You can choose local Ollama or an OpenAI-compatible endpoint instead, and change this later in Settings. API keys are stored in the OS keyring. Connection checks run only when clicked. If a selected model is unavailable, the app uses its built-in offline summary.

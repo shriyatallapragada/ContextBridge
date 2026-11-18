@@ -34,13 +34,24 @@ PAYLOAD = "# ContextBridge handoff\n\n## Done\n- did the thing\n\n## Active file
 
 def test_registry_names_and_aliases() -> None:
     assert valid_names() == [
-        "aider", "claude", "claude-code", "codex", "cursor", "generic", "kiro", "opencode"
+        "aider",
+        "claude",
+        "claude-code",
+        "codex",
+        "cursor",
+        "generic",
+        "kiro",
+        "opencode",
     ]
     assert resolve_name("Claude") == "claude"
     assert resolve_name(" claude-code ") == "claude"
     assert resolve_name("aider") == resolve_name("opencode") == "generic"
     assert [a.name for a in all_adapters(Path("."))] == [
-        "claude", "codex", "cursor", "generic", "kiro"
+        "claude",
+        "codex",
+        "cursor",
+        "generic",
+        "kiro",
     ]
 
 
@@ -49,7 +60,16 @@ def test_unknown_agent_lists_valid_names(tmp_path: Path) -> None:
         get_adapter("gemini", tmp_path)
     assert "gemini" in err.value.message
     assert err.value.hint is not None
-    for name in ("claude", "codex", "cursor", "generic", "kiro", "aider", "claude-code", "opencode"):
+    for name in (
+        "claude",
+        "codex",
+        "cursor",
+        "generic",
+        "kiro",
+        "aider",
+        "claude-code",
+        "opencode",
+    ):
         assert name in err.value.hint
 
 

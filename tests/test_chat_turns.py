@@ -32,11 +32,9 @@ def test_flutter_lab_export_joins_wrapped_turns_and_keeps_progression():
     )
     assert "Navigator" in sections["Current state"][0]
     done = "\n".join(sections["Done"])
-    assert done.index("project creation instructions") < done.index("lab report document")
-    assert done.index("lab report document") < done.index("interactive HTML simulation")
-    assert done.index("interactive HTML simulation") < done.index("successfully updated both")
+    assert done.index("project creation instructions") < done.index("interactive HTML simulation")
     assert "I will now" not in done
-    assert any("preview and test all 6" in line for line in sections["Next steps"])
+    assert not any("preview and test all 6" in line for line in sections["Next steps"])
     assert sections["Files"] == ["`flutter_outputs_preview.html`", "`flutter_lab_observations.md`"]
     output = condense_chat(text)
     assert "https://" not in output and "(trimmed)" not in output
@@ -75,7 +73,7 @@ def test_export_speaker_labels_and_wrapped_sentences(user, assistant):
     sections = chat_sections(text)
     assert len(parse_turns(text)) == 3
     assert "responsive Flutter application with navigation." in sections["Goal"][0]
-    assert "Flutter application in main.dart." in sections["Done"][0]
+    assert "No completed work" in sections["Done"][0]  # already included in Current state
     assert "settings screen and explain the navigation steps?" in sections["Current state"][-1]
     assert "Latest assistant response" in sections["Current state"][0]
     assert any("settings screen" in line for line in sections["Next steps"])
@@ -96,10 +94,10 @@ def test_dedupe_noise_urls_and_chronological_completion_claims():
     )
     sections = chat_sections(text)
     output = condense_chat(text)
-    assert len(sections["Done"]) == 3
+    assert len(sections["Done"]) == 2
     assert "installation" in sections["Done"][0]
     assert "navigation.html" in sections["Done"][1]
-    assert "report.md" in sections["Done"][2]
+    assert "report.md" not in "\n".join(sections["Done"])
     assert "private tool output" not in output and "Tool call" not in output
     assert "https://" not in output
     assert any("Review the diagrams" in line for line in sections["Next steps"])
@@ -142,3 +140,39 @@ def test_unstructured_text_is_quoted_without_urls():
     )
     assert "Imported text" in output and "notes.md" in output
     assert "https://" not in output and "private.md" not in output
+
+
+def test_flutter_goal_neutral_done_and_no_closing_next_steps():
+    sections = chat_sections(FIXTURE.read_text())
+    assert len(" ".join(sections["Goal"]).split()) <= 40
+    assert "Questions:" not in sections["Goal"][0]
+    assert "minimal" in sections["Goal"][0]
+    assert all(not line.startswith(("I ", "I've", "We ")) for line in sections["Done"])
+    assert any(line.startswith("Added project creation") for line in sections["Done"])
+    assert "Updated the lab report document." not in sections["Done"]
+    assert any("Steps & Procedure" in line for line in sections["Done"])
+    assert not any("successfully updated both" in line.lower() for line in sections["Done"])
+    assert sections["Next steps"] == ["No explicit next steps or final open questions were stated."]
+
+
+def test_flutter_explicit_question_survives_closing_preview():
+    sections = chat_sections(FIXTURE.read_text() + "\nShould we add keyboard navigation?")
+    assert sections["Next steps"] == ["Should we add keyboard navigation?"]
+
+
+def test_flutter_labeled_preview_is_not_a_next_step():
+    sections = chat_sections(FIXTURE.read_text() + "\nNext steps: You can now preview the report.")
+    assert sections["Next steps"] == ["No explicit next steps or final open questions were stated."]
+
+
+def test_flutter_long_goal_keeps_the_request_before_its_details():
+    text = FIXTURE.read_text().replace(
+        "solution as minimal as possible with an output.",
+        "solution as minimal as possible with an output, including "
+        + "navigation widgets layouts responsive breakpoints " * 12
+        + ".",
+    )
+    goal = chat_sections(text)["Goal"][0]
+    assert len(goal.split()) <= 40
+    assert "Flutter" in goal or "flutter" in goal
+    assert "Questions:" not in goal

@@ -44,8 +44,16 @@ def _isolate_config(
         "CB_CLOUD_FALLBACK",
         "GROQ_API_KEY",
         "OPENAI_API_KEY",
+        "CB_API_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
+    # Test credentials never access the user's OS keyring.
+    import keyring
+
+    def unavailable():
+        raise RuntimeError("test keyring is unavailable")
+
+    monkeypatch.setattr(keyring, "get_keyring", unavailable)
     # Never talk to a real local Ollama: port 9 (discard) refuses connections at once.
     monkeypatch.setenv("CB_OLLAMA_HOST", "http://127.0.0.1:9")
 

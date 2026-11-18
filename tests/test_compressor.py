@@ -39,8 +39,8 @@ class FakeClient:
     def is_cloud(self) -> bool:
         return self.cloud
 
-    def complete(self, system: str, user: str, *, max_tokens: int) -> str:
-        self.calls.append((system, user, max_tokens))
+    def generate(self, prompt, schema=None):
+        self.calls.append(("", prompt, 0))
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response

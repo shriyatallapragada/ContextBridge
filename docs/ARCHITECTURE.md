@@ -296,30 +296,31 @@ The spec didn't place `bug` and `todo`, so those two slots are a design choice.
 
 **Two token numbers, deliberately separate.** `raw_tokens` is the size of the *full* context before any truncation: what the next agent would otherwise need. The model's input is then capped at `max_input_tokens` (12000) by `fit_items`. That function keeps whole items in priority order, truncates the first one that doesn't fit (if more than 40 tokens remain), and drops the rest. Compression ratio is always computed against the true raw size.
 
-### The LLM client (`synthesis/llm_client.py`)
+### Optional providers (`providers/`)
 
-Routing:
+The shared `generate(prompt, schema=None)` interface has offline (`none`), loopback
+Ollama, and OpenAI-compatible HTTP implementations. The default is `none`, which makes
+no requests. `synthesis/llm_client.py` preserves the previous client imports. Explicit
+legacy Groq/OpenAI choices and the old hosted-fallback opt-in remain supported.
 
-```
-provider = ollama      -> Ollama, then (if cloud_fallback and the key is set) Groq/OpenAI
-provider = groq|openai -> that provider (if its key is set)
-provider = none, or --no-llm -> no clients
-```
+Ollama requests set `options.num_ctx` explicitly. Both HTTP transports bound time and
+response size, disable inherited proxies and redirects, sanitize prompts, and report
+safe errors without response bodies or credentials. Structured responses are validated
+against the supplied JSON schema. No model SDK is required.
 
-Ollama errors map to three kinds: **unavailable** (connection refused, model missing with an `ollama pull` hint), **timeout**, and **other**. Cloud clients use `max_retries=0` and your timeout, and `llm.cloud_model` overrides the default per-provider model, since the Ollama model name isn't valid for Groq or OpenAI. All calls use temperature 0.2.
+`ProviderSettingsService` is shared by the CLI and GUI. Config stores provider metadata;
+API credentials go to a secure OS-keyring backend scoped to the endpoint. A failed
+credential save has no plaintext fallback. The first-run screen and project Settings
+use the same form. Connection checks are explicit actions and send no project context.
 
 ### The compressor (`synthesis/compressor.py`)
 
-For each candidate client, in order:
-
-1. **Notice.** If it's a cloud client, print a one-line notice saying sanitized context is being sent, and why.
-2. **Re-sanitize** the prompt text just before it leaves the process, as defense in depth.
-3. **Ask** using your configured system prompt (the spec's default: "senior systems architect creating an emergency session handoff...") plus the context.
-4. **Clean the output** by stripping `<think>...</think>`, wrapping code fences, and chatty openers ("Here is the summary:").
-5. **Validate length.** Within budget: accept. Over: **retry once** with a stricter instruction (75% of target), then **truncate line by line** with a note if still over.
-6. Any provider error moves to the next candidate. Even an unexpected exception from an SDK is caught.
-
-If nothing works, the **deterministic fallback** runs. It can't fail and needs nothing external. It fills a fixed template (Goal/Branch, Done, Files & symbols, Decisions, Failing tests, Blockers, Next steps). When over budget it repeatedly deletes the lowest-priority, latest-in-document line until it fits.
+The engine renders a deterministic document first, reserving essential sections before
+file details. An optional model can only polish whitespace and final punctuation.
+Validation preserves factual words, paths, counts, order and section membership, then
+checks the token budget. Invalid rewrites retry once. Transport errors, invalid schema
+responses and rejected factual changes retain the deterministic result. Hosted calls
+notify the caller before sending sanitized wording.
 
 ### The payload
 
@@ -494,7 +495,7 @@ It lives in `contextbridge/gui/` and is deliberately thin.
   data, never prints, and never imports Qt or Typer. The CLI commands call it too, so the two
   front ends can't drift apart. A handoff is **prepared** (built, nothing written) and then
   **committed** (written and recorded), so what you preview is exactly what is written.
-- **Screens** (`gui/pages/`): Home, Notes, Changes, Hand off, Settings, plus a Welcome screen.
+- **Screens** (`gui/pages/`): Home, Notes, Changes, Hand off, Settings, Guide, Welcome and first-run Setup.
   Each is built from the small widgets in `widgets.py`. User-facing wording ("notes",
   "words", "functions") lives in `wording.py`, so the technical terms never leak.
 - **Never freezes**: git, tests and AI calls run on a thread pool (`workers.py`). Results come
@@ -508,5 +509,5 @@ It lives in `contextbridge/gui/` and is deliberately thin.
   app. In a packaged app `sys.executable` is the app, not Python, so the git hook runs it as
   `<app> --cli hook post-commit`. That mode behaves like `cb` and never opens a window
   (`docs/PACKAGING.md`).
-- **Choices**: AI is "Smart" (use Ollama if running, else a template) or "Template only".
-  Cloud providers stay command-line only, so no API key is ever typed into or stored by the app.
+- **Choices**: offline, local Ollama or an API endpoint. API key inputs are masked and
+  saved through the OS keyring. Offline mode is the default and needs no model.

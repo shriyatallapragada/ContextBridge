@@ -1,9 +1,11 @@
 """Configuration: defaults, global file, per-project override, env overrides.
 
 Load order (later wins): built-in defaults -> global config
-(``<user config dir>/contextbridge/config.json``) -> ``.context/config.json`` -> env vars.
+(``<user config dir>/contextbridge/config.json``) -> ``.contextbridge/config.json``
+(legacy ``.context/`` fallback) -> env vars.
 
-API keys are never part of the config; they are read from the environment only.
+API keys are never part of the config; they come from the OS keyring or explicit
+legacy environment variables.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ APP_NAME = "contextbridge"
 CONFIG_FILENAME = "config.json"
 CONFIG_DIR_ENV = "CB_CONFIG_DIR"
 
-LLM_PROVIDERS = ("ollama", "groq", "openai", "none")
+LLM_PROVIDERS = ("ollama", "groq", "openai", "openai-compatible", "none")
 CLOUD_PROVIDERS = ("groq", "openai")
 API_KEY_ENV = {"groq": "GROQ_API_KEY", "openai": "OPENAI_API_KEY"}
 # Used when `llm.cloud_model` is empty (the Ollama model name is not valid in the cloud).
@@ -42,8 +44,11 @@ _FORBIDDEN_KEY = re.compile(r"(?i)(api_?key|secret|password|passwd|(^|_)token)$"
 
 @dataclass
 class LLMConfig:
-    provider: str = "ollama"
+    provider: str = "none"
     model: str = "qwen2.5-coder:7b"
+    base_url: str = "https://api.openai.com/v1"
+    num_ctx: int = 16384
+    setup_complete: bool = False
     ollama_host: str = "http://localhost:11434"
     cloud_fallback: bool = False
     cloud_provider: str = "groq"
@@ -105,6 +110,8 @@ class Config:
             raise ConfigError("handoff.target_tokens must not exceed handoff.hard_cap_tokens.")
         if self.handoff.max_input_tokens < self.handoff.hard_cap_tokens:
             raise ConfigError("handoff.max_input_tokens must be at least hard_cap_tokens.")
+        if self.llm.num_ctx <= 0:
+            raise ConfigError("llm.num_ctx must be positive.")
         if self.llm.timeout_seconds <= 0:
             raise ConfigError("llm.timeout_seconds must be positive.")
         if not self.handoff.system_prompt.strip():

@@ -9,6 +9,7 @@ import typer
 from contextbridge import __version__
 from contextbridge.cli.clear_cmd import clear_command
 from contextbridge.cli.common import AppContext, console
+from contextbridge.cli.configure_cmd import configure_command
 from contextbridge.cli.gui_cmd import gui_command
 from contextbridge.cli.handoff_cmd import handoff_command
 from contextbridge.cli.hook_cmd import hook_app
@@ -55,6 +56,7 @@ def main(
 
 
 app.command("init")(init_command)
+app.command("configure")(configure_command)
 app.command("log")(log_command)
 app.command("status")(status_command)
 app.command("watch")(watch_command)

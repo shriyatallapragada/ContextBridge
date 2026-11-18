@@ -13,7 +13,7 @@ def test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CB_OLLAMA_HOST")  # set by the autouse isolation fixture
     cfg = load_config()
     assert cfg == Config()
-    assert cfg.llm.provider == "ollama"
+    assert cfg.llm.provider == "none"
     assert cfg.handoff.target_tokens == 2000
     assert ".contextbridge/**" in cfg.capture.ignore_globs
 

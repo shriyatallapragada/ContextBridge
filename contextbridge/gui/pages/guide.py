@@ -165,9 +165,7 @@ class GuidePage(ProjectPage):
             if self.service is svc and ticket == self._read_ticket:
                 self.status.setText(f"Could not read document: {exc}")
 
-        self.host.runner.run(
-            lambda _emit: svc.read_document(path), on_done=done, on_error=failed
-        )
+        self.host.runner.run(lambda _emit: svc.read_document(path), on_done=done, on_error=failed)
 
     def _load(self) -> None:
         svc = self.service

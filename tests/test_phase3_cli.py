@@ -115,9 +115,9 @@ def test_handoff_uses_mocked_llm_and_reports_counts(
         model = "fake"
         is_cloud = False
 
-        def complete(self, system: str, user: str, *, max_tokens: int) -> str:
+        def generate(self, user: str, schema=None) -> str:
             calls.append(user)
-            return json.dumps(json.loads(user))
+            return json.dumps({"lines": json.loads(user)["lines"]})
 
     monkeypatch.setattr(compressor, "candidates", lambda cfg, no_llm=False: [Fake()])
     result = runner.invoke(app, ["handoff", "--dry-run", "--print"])
@@ -134,7 +134,7 @@ def test_cloud_fallback_prints_notice(session_repo: Path, monkeypatch: pytest.Mo
         model = "llama"
         is_cloud = True
 
-        def complete(self, system: str, user: str, *, max_tokens: int) -> str:
+        def generate(self, user: str, schema=None) -> str:
             return "- cloud summary"
 
     monkeypatch.setattr(compressor, "candidates", lambda cfg, no_llm=False: [Cloud()])

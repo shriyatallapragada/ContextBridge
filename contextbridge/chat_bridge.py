@@ -139,6 +139,47 @@ def _labeled(text: str) -> list[tuple[str, str]]:
     return [(match[1].lower(), match[2].strip()) for match in pattern.finditer(text)]
 
 
+def concise_goal(text: str) -> str:
+    candidates = sentences(
+        re.split(r"\bQuestions?:|(?:^|\s)\d+[.)]\s", text, maxsplit=1, flags=re.I)[0]
+    )
+    chosen: list[str] = []
+    for sentence in candidates[:2]:
+        if len(sentence.split()) > 40:
+            # Keep a complete leading request clause, excluding detailed enumerations.
+            clauses = re.split(r"[,;:]|\b(?:including|such as|with the following)\b", sentence)
+            sentence = sentences(clauses[0])[0]
+        if len((" ".join([*chosen, sentence])).split()) <= 40:
+            chosen.append(sentence)
+    return " ".join(chosen) or (
+        "Address the initial user request. "
+        "Refer to the original chat for its detailed requirements."
+    )
+
+
+def neutral_completion(text: str) -> str:
+    value = re.sub(
+        r"^(?:I(?: have|'ve)?|We(?: have|'ve)?)\s+(?:successfully\s+)?", "", text, flags=re.I
+    )
+    return value[:1].upper() + value[1:]
+
+
+def completion_claims(text: str) -> list[str]:
+    statements = sentences(text)
+    claims = []
+    for index, line in enumerate(statements):
+        if not _COMPLETED.search(line):
+            continue
+        if re.fullmatch(
+            r"Updated (?:the )?(?:lab report )?document\.", neutral_completion(line), re.I
+        ) and index + 1 < len(statements):
+            detail = statements[index + 1]
+            if re.search(r"\b(?:now includes?|now contains?|now has)\b", detail, re.I):
+                line += " " + detail
+        claims.append(line)
+    return claims
+
+
 def chat_sections(transcript: str, goal: str = "", pinned: str = "") -> dict[str, list[str]]:
     turns = parse_turns(transcript)
     cleaned = clean_export(transcript)
@@ -158,9 +199,9 @@ def chat_sections(transcript: str, goal: str = "", pinned: str = "") -> dict[str
     ]
     substantial = requests[0] if requests else None
     if goal.strip():
-        sections["Goal"] = sentences(sanitize(goal))[:1]
+        sections["Goal"] = [concise_goal(sanitize(goal))]
     elif substantial:
-        sections["Goal"] = [" ".join(sentences(substantial.text))]
+        sections["Goal"] = [concise_goal(substantial.text)]
     if pinned.strip():
         sections["Decisions"] = sentences("User-pinned facts — " + sanitize(pinned))
     if users:
@@ -211,9 +252,7 @@ def chat_sections(transcript: str, goal: str = "", pinned: str = "") -> dict[str
     end_start = max((i for i, turn in enumerate(evidence) if turn.role == "assistant"), default=0)
     for index, turn in enumerate(evidence):
         if turn.role == "assistant":
-            sections["Done"].extend(
-                line for line in sentences(turn.text) if _COMPLETED.search(line)
-            )
+            sections["Done"].extend(completion_claims(turn.text))
         for label, value in _labeled(turn.text.replace("\n", ". ")):
             title = mapping[label]
             if title == "Current state" and turns:
@@ -232,7 +271,8 @@ def chat_sections(transcript: str, goal: str = "", pinned: str = "") -> dict[str
                 "Done": "Reported completed work — ",
                 "Open problems": "Reported problem — ",
             }.get(title, "Reported state — ")
-            sections[title].extend(sentences(prefix + value))
+            values = sentences(prefix + value)
+            sections[title].extend([concise_goal(value)] if title == "Goal" else values)
     if turns:
         ending = sentences(turns[-1].text)
         for line in ending:
@@ -240,15 +280,38 @@ def chat_sections(transcript: str, goal: str = "", pinned: str = "") -> dict[str
                 continue
             explicit = bool(
                 re.search(
-                    r"\b(?:next(?: step)?|you can now|please (?:review|test|check)|todo)\b",
+                    r"\b(?:next(?: step)?|please (?:review|test|check)|todo)\b",
                     line,
                     re.I,
                 )
             )
-            if explicit or line.endswith("?"):
+            closing = re.search(
+                r"you can now|let me know|would you like any|any further|anything else", line, re.I
+            )
+            if (explicit or line.endswith("?")) and not closing:
                 sections["Next steps"].append(line)
         if turns[-1].role == "user" and turns[-1] in requests:
             sections["Next steps"].extend(ending)
+    current_claims = {
+        neutral_completion(line.split(" — ", 1)[-1]).casefold()
+        for line in sections["Current state"]
+    }
+    completed = [neutral_completion(line) for line in sections["Done"]]
+    specific = [
+        line
+        for line in completed
+        if not re.fullmatch(r"Updated (?:the )?(?:lab report )?document\.", line, re.I)
+    ]
+    sections["Done"] = [
+        line for line in (specific or completed) if line.casefold() not in current_claims
+    ]
+    sections["Next steps"] = [
+        line
+        for line in sections["Next steps"]
+        if not re.search(
+            r"you can now|let me know|would you like any|any further|anything else", line, re.I
+        )
+    ]
     clean_text = " ".join(turn.text for turn in turns) if turns else cleaned
     sections["Files"] = [f"`{name}`" for name in dict.fromkeys(_FILE.findall(clean_text))]
     defaults = {

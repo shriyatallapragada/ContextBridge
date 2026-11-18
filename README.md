@@ -17,11 +17,13 @@ If you'd rather click than type, there's a friendly desktop app with the same fe
 - **Changes**: the files and functions you've changed, and a button to run your tests
 - **Hand off**: pick who's taking over (Claude Code, Cursor, or another tool), preview the
   summary in plain words, and write it
-- **Settings**: AI on or off, automatic commit notes, and a clearly marked "start fresh" area
+- **Settings**: offline, Ollama or API selection, automatic commit notes, and a clearly marked "start fresh" area
 
 Open it by double-clicking [`launch.command`](launch.command) on macOS, or run `./launch.command`
 from Terminal. See [LAUNCH.md](LAUNCH.md) for first-launch instructions. The app works fully
 offline and never needs Ollama; if Ollama is unavailable, it uses a deterministic summary.
+On first launch, setup explains offline operation and lets you continue without a model,
+choose local Ollama, or enter an API endpoint and key. Connection checks run only when clicked.
 Artwork can be swapped without touching code: see [docs/GUI_ASSETS.md](docs/GUI_ASSETS.md).
 
 ## Offline guide and chatbot transfer
@@ -39,7 +41,7 @@ uv sync --all-extras && uv run cb --help
 ```
 
 Requires Python 3.11+ and `git`. Optional extras: `gui` (the desktop app), `vector`
-(semantic search), `cloud` (Groq/OpenAI), `build` (make the standalone app).
+(semantic search), `cloud` (legacy SDK tooling), `build` (make the standalone app).
 
 ## 5-minute quickstart
 
@@ -64,7 +66,8 @@ No LLM is needed. Without one, the handoff is built from a deterministic templat
 | `cb log "msg" [--tag note\|bug\|architecture\|blocker\|todo]` | Record a note in the current session |
 | `cb run -- <cmd>` | Run a command, stream its output, record pytest/jest/vitest/`go test`/`cargo test` results |
 | `cb status` | Dashboard: branch, changes and symbols, tests, decisions, last handoff, token stats |
-| `cb handoff --from A --to B [--dry-run] [--no-llm] [--print] [--force]` | Build, compress and write the handoff |
+| `cb configure --provider none\|ollama\|openai-compatible [--global]` | Explicitly choose a model provider or offline operation |
+| `cb handoff --to B [--from A] [--budget N] [--copy] [--dry-run] [--no-llm] [--print] [--force]` | Build, compress and write the handoff |
 | `cb search "query"` | Search decisions and changes (keyword, or semantic with the `vector` extra) |
 | `cb clear [--session] [--all] [--cleanup-adapters] [--yes]` | Archive the session, delete all data, and/or remove injected agent files |
 
@@ -107,15 +110,15 @@ so handoffs do not grow on each other.
 
 `cb handoff` gathers the session's decisions, commits, changed files and symbols,
 uncommitted and untracked files, and the last test run. It then fits that to
-`handoff.hard_cap_tokens` (default 600), trying in order:
+`handoff.hard_cap_tokens` (default 2000, overridden by `--budget`). It reserves space
+for Goal, Done, Decisions and Next steps before filling file details. Source files
+rank above tests, which appear as aggregate counts.
 
-1. **Ollama** (`llm.model`, default `qwen2.5-coder:7b`), if it is running.
-2. **Groq or OpenAI**, only if `llm.cloud_fallback` is `true` and `GROQ_API_KEY` /
-   `OPENAI_API_KEY` is set. A notice is printed every time the cloud is used.
-3. **A deterministic template**: always available and fully offline.
-
-Under a tight cap the lowest-priority content is dropped first: notes, then diffs,
-todos, changed symbols, failing tests, architecture decisions, and finally blockers.
+The default provider is **none**. Optional providers can polish the recorded wording
+while preserving facts, file paths, numbers and line order. Missing models, bad responses,
+timeouts and rate limits fall back to the offline template. Choosing Ollama does not
+enable a hosted fallback. Existing explicit Groq/OpenAI configurations and the old
+`cloud_fallback` opt-in remain supported.
 Token counts use tiktoken's `cl100k_base` and are approximate for other models. The
 payload can be larger than the raw context for a very small session; the ratio shown is
 always computed from real counts.
@@ -127,15 +130,33 @@ wins). Example:
 
 ```json
 {
-  "llm": { "provider": "ollama", "model": "qwen2.5-coder:7b", "cloud_fallback": false },
+  "llm": { "provider": "none", "num_ctx": 16384 },
   "capture": { "max_diff_chars_per_file": 4000, "ignore_globs": ["*.lock", "dist/**"] },
-  "handoff": { "target_tokens": 400, "hard_cap_tokens": 600 },
+  "handoff": { "target_tokens": 2000, "hard_cap_tokens": 2000 },
   "vector": { "enabled": false }
 }
 ```
 
-API keys are read only from environment variables and are never written to config or the
-database.
+Choose a provider in desktop Settings or use the CLI. Omit `--global` to save the
+selection for the current initialized project.
+
+```bash
+cb configure --global --provider none
+cb configure --global --provider ollama --model qwen2.5-coder:7b
+cb configure --global --provider openai-compatible --model YOUR_MODEL \
+  --endpoint https://YOUR_PROVIDER/v1 --set-key
+```
+
+`--set-key` uses a hidden prompt. Keys are stored in the OS keyring, scoped to the
+endpoint, never in configuration or the database. If a secure OS keyring is unavailable,
+setup reports the error and offline mode stays available. Legacy `OPENAI_API_KEY` and
+`GROQ_API_KEY` settings still work; `CB_API_KEY` is an explicit environment fallback for
+compatible endpoints. The provider selection must also be enabled.
+
+Ollama uses loopback HTTP with an explicit `options.num_ctx` (default 16384, configurable
+as `llm.num_ctx`). Compatible endpoints use `/chat/completions` with optional JSON schema
+output. Requests go directly to the selected endpoint, ignoring proxy environment
+variables and redirects. No Ollama, OpenAI or Groq SDK is required.
 
 ## Privacy
 
@@ -206,8 +227,8 @@ Run the CLI with `uv run cb --help`, or launch the desktop app with
 `uv run cb gui`. Run engine boundary checks with
 `uv run pytest -q tests/test_engine_boundary.py tests/test_service.py`.
 
-The next stages will add the watcher, optional provider setup, and local API.
-The folder migration will copy existing `.contextbridge/` data and retain legacy reads.
+The watcher and optional provider setup are implemented. The next stages add the local API.
+The folder migration copies existing `.context/` data and retains legacy reads.
 The API will bind to `127.0.0.1` and authenticate every request with a random
 per-session token. The first desktop packaging target is macOS, with signing deferred.
 

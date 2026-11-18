@@ -16,7 +16,7 @@ from contextbridge.service import ChatService, ProjectService
 
 
 def test_engine_works_when_frontend_imports_are_blocked(tmp_path: Path) -> None:
-    script = '''
+    script = """
 import importlib.abc
 import sys
 from pathlib import Path
@@ -39,31 +39,34 @@ assert 'Use SQLite' in service.prepare_handoff('claude', 'generic').handoff.payl
 assert service.guide_content(snapshot).progress
 assert service.project_map() is not None
 assert 'hello' in ChatService.prepare('hello', 'continue', '').text
-'''
+"""
     env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1]))
     result = subprocess.run(
-        [sys.executable, '-c', script, str(tmp_path)],
-        capture_output=True, text=True, env=env, timeout=30,
+        [sys.executable, "-c", script, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
     )
     assert result.returncode == 0, result.stderr
 
 
 def test_document_reads_are_bounded_sanitized_and_confined(tmp_path: Path) -> None:
-    root = tmp_path / 'project'
+    root = tmp_path / "project"
     root.mkdir()
     service = ProjectService(root)
-    document = root / 'README.md'
-    document.write_text('AKIAIOSFODNN7EXAMPLE\n' + 'x' * 128001)
+    document = root / "README.md"
+    document.write_text("AKIAIOSFODNN7EXAMPLE\n" + "x" * 128001)
     text = service.read_document(document)
-    assert 'AKIAIOSFODNN7EXAMPLE' not in text
-    assert text.endswith('Document excerpt limited to 128,000 characters.')
-    outside = tmp_path / 'outside.md'
-    outside.write_text('private')
+    assert "AKIAIOSFODNN7EXAMPLE" not in text
+    assert text.endswith("Document excerpt limited to 128,000 characters.")
+    outside = tmp_path / "outside.md"
+    outside.write_text("private")
     with pytest.raises(UserError):
         service.read_document(outside)
-    (root / 'linked.md').symlink_to(outside)
+    (root / "linked.md").symlink_to(outside)
     with pytest.raises(UserError):
-        service.read_document(root / 'linked.md')
+        service.read_document(root / "linked.md")
 
 
 def test_cli_notes_status_and_search_use_service(
@@ -72,7 +75,7 @@ def test_cli_notes_status_and_search_use_service(
     service = ProjectService(git_repo)
     service.init(install_hook=False)
     calls: list[str] = []
-    for name in ('add_note', 'snapshot', 'search'):
+    for name in ("add_note", "snapshot", "search"):
         original = getattr(ProjectService, name)
 
         def record(self, *args, _name=name, _original=original, **kwargs):
@@ -81,19 +84,19 @@ def test_cli_notes_status_and_search_use_service(
 
         monkeypatch.setattr(ProjectService, name, record)
     runner = CliRunner()
-    for args in (['log', 'SQLite decision'], ['status'], ['search', 'SQLite']):
+    for args in (["log", "SQLite decision"], ["status"], ["search", "SQLite"]):
         result = runner.invoke(app, args)
         assert result.exit_code == 0, result.output
-    assert calls == ['add_note', 'snapshot', 'search']
+    assert calls == ["add_note", "snapshot", "search"]
 
 
 def test_chat_service_import_and_prepare_need_no_project(tmp_path: Path) -> None:
-    path = tmp_path / 'chat.md'
-    path.write_text('user: Keep SQLite\nassistant: Agreed')
+    path = tmp_path / "chat.md"
+    path.write_text("user: Keep SQLite\nassistant: Agreed")
     imported = ChatService.import_file(path)
-    packet = ChatService.prepare(imported.text, 'Build next feature', 'Keep SQLite')
-    assert 'Build next feature' in packet.text
-    assert 'Keep SQLite' in packet.text
+    packet = ChatService.prepare(imported.text, "Build next feature", "Keep SQLite")
+    assert "Build next feature" in packet.text
+    assert "Keep SQLite" in packet.text
     assert list(tmp_path.iterdir()) == [path]
 
 
@@ -102,9 +105,9 @@ def test_commit_capture_is_available_through_engine(git_repo: Path) -> None:
 
     service = ProjectService(git_repo)
     service.init(install_hook=False)
-    write(git_repo, 'feature.py', 'def feature():\n    return 42\n')
-    commit_all(git_repo, 'add feature')
+    write(git_repo, "feature.py", "def feature():\n    return 42\n")
+    commit_all(git_repo, "add feature")
     assert service.ingest_head() > 0
     assert service.ingest_head() == 0
     snapshot = service.snapshot(include_worktree=False)
-    assert any(item.path == 'feature.py' for item in snapshot.context.files)
+    assert any(item.path == "feature.py" for item in snapshot.context.files)

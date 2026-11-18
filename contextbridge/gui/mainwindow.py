@@ -32,9 +32,11 @@ from contextbridge.gui.pages.handoff import HandoffPage
 from contextbridge.gui.pages.home import HomePage
 from contextbridge.gui.pages.notes import NotesPage
 from contextbridge.gui.pages.settings import SettingsPage
+from contextbridge.gui.pages.setup import SetupPage
 from contextbridge.gui.pages.welcome import WelcomePage
 from contextbridge.gui.widgets import Toast, add_shortcut, button, label
 from contextbridge.gui.workers import TaskRunner
+from contextbridge.providers.settings import ProviderSettingsService
 from contextbridge.service import ProjectService, Snapshot, git_is_installed
 
 log = logging.getLogger("contextbridge")
@@ -76,6 +78,8 @@ class MainWindow(QMainWindow):
         self.welcome = WelcomePage(self)
         self.root.addWidget(self.welcome)
         self.root.addWidget(self._build_shell())
+        self.setup_page = SetupPage(self, self._finish_provider_setup)
+        self.root.addWidget(self.setup_page)
         self.toast_widget = Toast(self.root)
 
         self._shortcuts()
@@ -86,10 +90,15 @@ class MainWindow(QMainWindow):
             on_error=lambda _exc: None,
         )
         self.root.setCurrentIndex(WELCOME_INDEX)
-        if restore_last:
+        if not ProviderSettingsService().load().llm.setup_complete:
+            self.root.setCurrentWidget(self.setup_page)
+        elif restore_last:
             last = str(self.settings.value("lastProject", "") or "")
             if last and Path(last).is_dir():
                 self.open_project(last)
+
+    def _finish_provider_setup(self) -> None:
+        self.root.setCurrentIndex(WELCOME_INDEX)
 
     # ----- building the window ------------------------------------------------------------------
 

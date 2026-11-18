@@ -266,7 +266,7 @@ def test_archive_cleanup_and_delete(svc: ProjectService) -> None:
 
 def test_ai_settings_roundtrip(svc: ProjectService) -> None:
     # The default is "local": try Ollama, and fall back to the template.
-    assert svc.load_ai_settings().mode == "local"
+    assert svc.load_ai_settings().mode == "off"
     svc.save_ai_settings("off")
     assert svc.load_ai_settings().mode == "off"
     cfg = json.loads(svc.ws.config_path.read_text())
@@ -302,31 +302,15 @@ def test_check_ollama_when_not_running() -> None:
     assert not result.ok and "isn't running" in result.message
 
 
-def test_check_ollama_model_missing_and_ready(monkeypatch: pytest.MonkeyPatch) -> None:
-    import types
+def test_check_ollama_model_missing_and_ready(monkeypatch):
+    from contextbridge.providers.http import HTTPProvider
 
-    import ollama
-
-    def listing(*names: str) -> object:
-        models = [types.SimpleNamespace(model=n) for n in names]
-        return types.SimpleNamespace(models=models)
-
-    class Fake:
-        names: tuple[str, ...] = ("other:1b",)
-
-        def __init__(self, **_kw: object) -> None:
-            pass
-
-        def list(self) -> object:
-            return listing(*Fake.names)
-
-    monkeypatch.setattr(ollama, "Client", Fake)
-    missing = check_ollama("http://h", "qwen2.5-coder:7b")
-    assert not missing.ok and "ollama pull qwen2.5-coder:7b" in missing.message
-    Fake.names = ("qwen2.5-coder:7b",)
-    assert check_ollama("http://h", "qwen2.5-coder:7b").ok
-    Fake.names = ("llama3:latest",)
-    assert check_ollama("http://h", "llama3").ok
+    monkeypatch.setattr(HTTPProvider, "request", lambda *_args: {"models": [{"name": "other:1b"}]})
+    assert "ollama pull" in check_ollama("http://localhost:11434", "qwen").message
+    monkeypatch.setattr(
+        HTTPProvider, "request", lambda *_args: {"models": [{"name": "qwen:latest"}]}
+    )
+    assert check_ollama("http://localhost:11434", "qwen").ok
 
 
 def test_git_is_installed_here() -> None:

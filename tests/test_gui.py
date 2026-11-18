@@ -80,6 +80,9 @@ class Shell:
 
 @pytest.fixture
 def shell(qapp: QApplication, tmp_path: Path) -> Iterator[Shell]:
+    from contextbridge.config import global_config_path, save_config
+
+    save_config({"llm": {"setup_complete": True}}, global_config_path())
     settings_path = tmp_path / "settings.ini"
     window = MainWindow(
         QSettings(str(settings_path), QSettings.Format.IniFormat), restore_last=False
@@ -561,12 +564,14 @@ def test_last_handoff_target_is_preselected(ready: Shell) -> None:
 
 def test_ai_choice_is_saved_and_used(ready: Shell, project: Path) -> None:
     settings = ready.page("settings")
-    assert settings.local_radio.isChecked() and settings.model_row.isVisibleTo(settings)
-    settings.off_radio.setChecked(True)
+    assert settings.provider_form.off_radio.isChecked()
+    settings.provider_form.local_radio.setChecked(True)
+    settings.provider_form.off_radio.setChecked(True)
+    settings.provider_form.save_button.click()
     ready.settle()
     config = json.loads((project / ".contextbridge" / "config.json").read_text())
     assert config["llm"]["provider"] == "none"
-    assert not settings.model_row.isVisibleTo(settings)
+    assert not settings.provider_form.fields.isVisibleTo(settings)
     handoff = ready.page("handoff")
     handoff.choice_cards["claude"].click()
     find_button(handoff, "Preview the summary").click()
@@ -575,6 +580,7 @@ def test_ai_choice_is_saved_and_used(ready: Shell, project: Path) -> None:
 
 
 def test_smart_mode_without_ollama_falls_back_quietly(ready: Shell) -> None:
+    ready.window.service.save_ai_settings("local")
     handoff = ready.page("handoff")
     handoff.choice_cards["claude"].click()
     find_button(handoff, "Preview the summary").click()
@@ -585,8 +591,9 @@ def test_smart_mode_without_ollama_falls_back_quietly(ready: Shell) -> None:
 
 def test_model_name_is_saved(ready: Shell, project: Path) -> None:
     settings = ready.page("settings")
-    settings.model_edit.setText("llama3:8b")
-    settings.model_edit.editingFinished.emit()
+    settings.provider_form.local_radio.setChecked(True)
+    settings.provider_form.model.setText("llama3:8b")
+    settings.provider_form.save_button.click()
     ready.settle()
     assert (
         json.loads((project / ".contextbridge" / "config.json").read_text())["llm"]["model"]
@@ -596,20 +603,23 @@ def test_model_name_is_saved(ready: Shell, project: Path) -> None:
 
 def test_check_connection_reports_in_plain_words(ready: Shell) -> None:
     settings = ready.page("settings")
+    settings.provider_form.local_radio.setChecked(True)
     find_button(settings, "Check connection").click()
     ready.settle()
-    assert settings.ai_message.isVisibleTo(settings)
-    assert "isn't running" in settings.ai_message._text.text()
+    assert settings.provider_form.message.isVisibleTo(settings)
+    assert "isn't running" in settings.provider_form.message.text()
     assert find_button(settings, "Check connection").isEnabled()
 
 
 def test_cloud_setup_is_shown_read_only(ready: Shell, project: Path) -> None:
-    (project / ".contextbridge" / "config.json").write_text(json.dumps({"llm": {"provider": "groq"}}))
+    (project / ".contextbridge" / "config.json").write_text(
+        json.dumps({"llm": {"provider": "groq"}})
+    )
     ready.window.refresh()
     ready.settle()
     settings = ready.page("settings")
-    assert settings.cloud_notice.isVisibleTo(settings)
-    assert not settings.local_radio.isVisibleTo(settings)
+    assert settings.provider_form.api_radio.isChecked()
+    assert settings.provider_form.endpoint.text() == "https://api.groq.com/openai/v1"
 
 
 def test_commit_recording_toggle(ready: Shell, project: Path) -> None:
@@ -642,7 +652,9 @@ def test_existing_hook_that_cannot_be_extended_is_explained(ready: Shell, projec
 
 
 def test_start_a_new_work_session(ready: Shell, project: Path) -> None:
-    before = json.loads((project / ".contextbridge" / "state.json").read_text())["active_session_id"]
+    before = json.loads((project / ".contextbridge" / "state.json").read_text())[
+        "active_session_id"
+    ]
     settings = ready.page("settings")
     find_button(settings, "Start a new work session").click()
     ready.settle()
@@ -829,26 +841,28 @@ def test_project_guide_reads_documentation(ready: Shell, project: Path) -> None:
 
 
 def test_guide_renders_markdown_and_workflow(ready: Shell, project: Path) -> None:
-    (project / 'README.md').write_text('# Readable heading\n\n**Bold text**\n\n| Name | Role |\n| --- | --- |\n| UI | Display |')
-    page = ready.page('guide')
-    find_button(page, 'Refresh guide').click()
+    (project / "README.md").write_text(
+        "# Readable heading\n\n**Bold text**\n\n| Name | Role |\n| --- | --- |\n| UI | Display |"
+    )
+    page = ready.page("guide")
+    find_button(page, "Refresh guide").click()
     ready.settle()
-    view = page.views['What it does']
-    assert '# Readable heading' not in view.toPlainText()
-    assert '<table' in view.toHtml()
+    view = page.views["What it does"]
+    assert "# Readable heading" not in view.toPlainText()
+    assert "<table" in view.toHtml()
     page.diagram.mode.setCurrentIndex(1)
     assert len(page.diagram.items) == 5
-    page.diagram.items['3. Prepare'].setSelected(True)
+    page.diagram.items["3. Prepare"].setSelected(True)
     assert any(arrow.isVisible() for _, _, arrow in page.diagram.arrows)
 
 
 def test_guide_rejects_documents_outside_project(ready: Shell, tmp_path: Path) -> None:
-    outside = tmp_path / 'private.md'
-    outside.write_text('Do not load this')
-    page = ready.page('guide')
+    outside = tmp_path / "private.md"
+    outside.write_text("Do not load this")
+    page = ready.page("guide")
     page._read_document(outside)
-    assert 'inside this project' in page.status.text()
-    assert 'Do not load this' not in page.views['What it does'].toPlainText()
+    assert "inside this project" in page.status.text()
+    assert "Do not load this" not in page.views["What it does"].toPlainText()
 
 
 def test_guide_flowcharts_visible_and_refresh_preserves_selection(ready: Shell) -> None:
@@ -869,23 +883,31 @@ def test_guide_flowcharts_visible_and_refresh_preserves_selection(ready: Shell) 
     assert not page.tabs.tabBar().isVisible()
 
 
-def test_chat_import_pdf_export_and_cancel_inflight(shell: Shell, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from contextbridge.gui.chat_pdf import save_chat_pdf
+def test_chat_import_pdf_export_and_cancel_inflight(
+    shell: Shell, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from contextbridge.chat_files import read_chat_file
+    from contextbridge.gui.chat_pdf import save_chat_pdf
 
-    source = tmp_path / 'source.pdf'
-    save_chat_pdf(source, '# Conversation\n\nUser: Keep the deadline on Friday.')
-    page = shell.page('chat')
-    monkeypatch.setattr('contextbridge.gui.pages.chat.QFileDialog.getOpenFileName', lambda *a, **kw: (str(source), 'PDF (*.pdf)'))
+    source = tmp_path / "source.pdf"
+    save_chat_pdf(source, "# Conversation\n\nUser: Keep the deadline on Friday.")
+    page = shell.page("chat")
+    monkeypatch.setattr(
+        "contextbridge.gui.pages.chat.QFileDialog.getOpenFileName",
+        lambda *a, **kw: (str(source), "PDF (*.pdf)"),
+    )
     page._import()
     shell.settle()
-    assert 'deadline on Friday' in page.transcript.toPlainText()
-    page.goal.setText('Continue planning')
+    assert "deadline on Friday" in page.transcript.toPlainText()
+    page.goal.setText("Continue planning")
     page._prepare()
-    output = tmp_path / 'handoff.pdf'
-    monkeypatch.setattr('contextbridge.gui.pages.chat.QFileDialog.getSaveFileName', lambda *a, **kw: (str(output), 'PDF (*.pdf)'))
-    find_button(page, 'Save PDF…').click()
-    assert 'Continue planning' in read_chat_file(output).text
+    output = tmp_path / "handoff.pdf"
+    monkeypatch.setattr(
+        "contextbridge.gui.pages.chat.QFileDialog.getSaveFileName",
+        lambda *a, **kw: (str(output), "PDF (*.pdf)"),
+    )
+    find_button(page, "Save PDF…").click()
+    assert "Continue planning" in read_chat_file(output).text
     page._import()
     page._clear()
     shell.settle()

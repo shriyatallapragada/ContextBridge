@@ -56,7 +56,8 @@ turn the setting off and on again in Settings to point it at the new location.
   Tools the first time it's needed; the app shows a friendly note if Git is missing.
 - **Running tests from the app** goes through your login shell, so tools like `npm`, `pytest`
   and `cargo` are found even though apps started from Finder have a bare PATH.
-- **Semantic search** (Chroma) and **cloud AI** are left out of the app to keep it small. The
-  command line (`pip install 'contextbridge[vector,cloud]'`) still has them.
+- **Semantic search** (Chroma) is left out of the app to keep it small. Install the
+  `vector` extra for command-line semantic search. Model providers use HTTP directly;
+  Ollama and API setup require no model SDKs.
 - **Windows and Linux builds** use the same recipe but have not been tested by hand. The
   `Build app` GitHub workflow builds and checks them.
