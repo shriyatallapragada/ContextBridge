@@ -44,10 +44,10 @@ class ChatPage(ProjectPage):
         self.pinned.setMaximumHeight(90)
         self.body.addWidget(self.pinned)
         self.budget = QSpinBox()
-        self.budget.setRange(2000, 12000)
+        self.budget.setRange(120, 12000)
         self.budget.setSingleStep(1000)
-        self.budget.setValue(6000)
-        self.budget.setSuffix(" characters maximum")
+        self.budget.setValue(2000)
+        self.budget.setSuffix(" tokens maximum")
         self.budget.setAccessibleName("Handoff size limit")
         self.body.addWidget(self.budget)
         make = button("Prepare handoff", "Primary")
@@ -80,7 +80,7 @@ class ChatPage(ProjectPage):
 
     def _prepare(self) -> None:
         try:
-            packet = ChatService.prepare(
+            packet = ChatService.condense(
                 self.transcript.toPlainText(),
                 self.goal.text(),
                 self.pinned.toPlainText(),
@@ -91,7 +91,8 @@ class ChatPage(ProjectPage):
             return
         self.preview.setPlainText(packet.text)
         self.status.setText(
-            f"{packet.source_chars:,} source characters → {len(packet.text):,} handoff characters. {packet.omitted_chars:,} earlier characters omitted. Approximately {len(packet.text) // 4:,} tokens (rough character estimate; not a credit estimate). Review the excerpt and add any missing facts."
+            f"{packet.source_chars:,} source characters → {len(packet.text):,} handoff characters. Approximately {len(packet.text) // 4:,} tokens (rough character estimate; not a credit estimate). Review the extracted facts and quoted lines before sharing."
+            + (" " + " ".join(packet.warnings) if packet.warnings else "")
         )
 
     def _invalidate_import(self) -> None:

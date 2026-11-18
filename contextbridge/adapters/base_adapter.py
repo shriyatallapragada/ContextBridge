@@ -167,7 +167,7 @@ class BaseAdapter(ABC):
         """
         body = sanitize(payload).strip()
         files = [sanitize(f) for f in active_files[:MAX_ACTIVE_FILES]]
-        if files and ACTIVE_FILES_HEADING not in body:
+        if files and ACTIVE_FILES_HEADING not in body and "## Files to read first" not in body:
             body += f"\n\n{ACTIVE_FILES_HEADING}\n" + "\n".join(f"- {f}" for f in files)
         return neutralize(body)
 

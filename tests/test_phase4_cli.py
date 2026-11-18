@@ -44,7 +44,11 @@ def repo(git_repo: Path) -> Path:
     commit_all(git_repo, "ignore .context/")
     cb("log", "Prices are integer cents", "--tag", "architecture")
     cb("log", "Empty cart crashes checkout", "--tag", "blocker")
-    write(git_repo, "cart.py", "def total(items):\n    return sum(i.cents for i in items)\n")
+    write(
+        git_repo,
+        "cart.py",
+        "def total(items):\n    values = [i.cents for i in items]\n    return sum(values)\n",
+    )
     commit_all(git_repo, "integer cents")
     cb("hook", "post-commit")
     return git_repo

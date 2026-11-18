@@ -31,7 +31,7 @@ MAX_SOURCE_BYTES = 1_000_000
 
 # Files ContextBridge writes whole. Never part of a session's changes, otherwise each
 # handoff would contain the previous one.
-INJECTED_FILES = ("HANDOFF.md", ".cursor/rules/handoff.mdc")
+INJECTED_FILES = ("AGENTS.md", "HANDOFF.md", ".cursor/rules/handoff.mdc")
 # Files that may carry an injected block among the user's own content.
 SHARED_INJECTED_NAME = "CLAUDE.md"
 

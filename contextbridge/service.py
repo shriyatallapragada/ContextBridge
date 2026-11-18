@@ -20,9 +20,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from contextbridge.adapters.base_adapter import MAX_ACTIVE_FILES, BaseAdapter
+from contextbridge.adapters.base_adapter import BaseAdapter
 from contextbridge.adapters.registry import all_adapters, get_adapter, resolve_name
-from contextbridge.chat_bridge import ChatPacket, build_chat_packet
+from contextbridge.chat_bridge import ChatPacket, build_chat_packet, chat_warnings, condense_chat
 from contextbridge.chat_files import ImportedChat, read_chat_file
 from contextbridge.config import save_config
 from contextbridge.core.git_observer import HOOK_START, GitObserver, HookResult
@@ -57,7 +57,12 @@ from contextbridge.storage.workspace import (
     find_context_dir,
     find_project_root,
 )
-from contextbridge.synthesis.compressor import Handoff, build_handoff, format_ratio
+from contextbridge.synthesis.compressor import (
+    Handoff,
+    build_handoff,
+    format_ratio,
+    prioritized_files,
+)
 from contextbridge.synthesis.context_builder import SessionContext, build_context
 
 log = logging.getLogger("contextbridge")
@@ -377,13 +382,11 @@ class ProjectService:
         plans = [f"- {d.content}" for d in ctx.decisions_tagged("todo")]
         blockers = [f"- {d.content}" for d in ctx.decisions_tagged("blocker")]
         progress_text = sanitize("\n".join(progress))
-        next_steps = (
-            sanitize(
-                "## Recorded to-dos\n\n"
-                + "\n".join(plans or ["None recorded. Add a To-do in Notes."])
-                + "\n\n## Recorded blockers\n\n"
-                + "\n".join(blockers or ["None recorded."])
-            )
+        next_steps = sanitize(
+            "## Recorded to-dos\n\n"
+            + "\n".join(plans or ["None recorded. Add a To-do in Notes."])
+            + "\n\n## Recorded blockers\n\n"
+            + "\n".join(blockers or ["None recorded."])
         )
         suggestions = ["These are rule-based suggestions, not an assessment of code quality."]
         if ctx.tests_failing:
@@ -413,7 +416,10 @@ class ProjectService:
         """Validate a document selection before scheduling a background read."""
         path = path.resolve()
         if not path.is_relative_to(self.root) or path.suffix.lower() not in (
-            ".md", ".txt", ".rst", ""
+            ".md",
+            ".txt",
+            ".rst",
+            "",
         ):
             raise UserError("Choose a Markdown or text document inside this project.")
         return path
@@ -439,6 +445,7 @@ class ProjectService:
                 session,
                 config,
                 project=ws.load_state().project_name,
+                root=ws.root,
                 observer=self._observer(),
                 include_worktree=include_worktree,
             )
@@ -519,10 +526,11 @@ class ProjectService:
 
     def prepare_handoff(
         self,
-        from_agent: str | None,
-        to_agent: str | None,
+        from_agent: str | None = None,
+        to_agent: str | None = None,
         *,
         use_llm: bool = True,
+        budget: int | None = None,
         force: bool = False,
         notify: Callable[[str], None] | None = None,
     ) -> PreparedHandoff:
@@ -531,7 +539,21 @@ class ProjectService:
         config = ws.load_config()
         # Validate the target before doing any work, so a typo fails instantly.
         adapter = get_adapter(to_agent, ws.root, force=force) if to_agent else None
-        label = agent_label(from_agent)
+        if budget is not None:
+            if budget < 120:
+                raise UserError("Use a budget of at least 120 tokens for the handoff sections.")
+            config.handoff.target_tokens = config.handoff.hard_cap_tokens = budget
+        detected = (
+            os.environ.get("CB_AGENT")
+            or ("codex" if os.environ.get("CODEX_THREAD_ID") else None)
+            or ("claude" if os.environ.get("CLAUDECODE") else None)
+            or "unknown"
+        )
+        label = agent_label(from_agent) or agent_label(detected) or "unknown"
+        if adapter and label == adapter.name and notify:
+            notify(
+                "Warning — the source and destination agents are the same. Check --from and --to."
+            )
         with ws.open_db() as db:
             session, _ = ws.active_session(db)
             context = build_context(
@@ -539,6 +561,7 @@ class ProjectService:
                 session,
                 config,
                 project=ws.load_state().project_name,
+                root=ws.root,
                 observer=self._observer(),
             )
         handoff = build_handoff(
@@ -555,7 +578,7 @@ class ProjectService:
             handoff=handoff,
             adapter=adapter,
             from_label=label,
-            active_files=[f.path for f in context.files[:MAX_ACTIVE_FILES]],
+            active_files=[item.path for item in prioritized_files(context)],
         )
 
     def commit_handoff(self, prepared: PreparedHandoff) -> CommittedHandoff:
@@ -680,6 +703,15 @@ class ChatService:
     @staticmethod
     def prepare(transcript: str, goal: str, pinned: str, budget: int = 6000) -> ChatPacket:
         return build_chat_packet(transcript, goal, pinned, budget)
+
+    @staticmethod
+    def condense(transcript: str, goal: str, pinned: str, budget: int = 2000) -> ChatPacket:
+        if len(goal) > 1000 or len(pinned) > 1000:
+            raise ValueError("Keep the goal and essential facts under 1,000 characters each.")
+        text = condense_chat(transcript, goal=goal, pinned=pinned, budget=budget)
+        return ChatPacket(
+            text, len(transcript), max(0, len(transcript) - len(text)), chat_warnings(transcript)
+        )
 
     @staticmethod
     def import_file(path: Path) -> ImportedChat:

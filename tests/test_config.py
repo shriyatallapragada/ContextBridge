@@ -14,7 +14,7 @@ def test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = load_config()
     assert cfg == Config()
     assert cfg.llm.provider == "ollama"
-    assert cfg.handoff.target_tokens == 400
+    assert cfg.handoff.target_tokens == 2000
     assert ".contextbridge/**" in cfg.capture.ignore_globs
 
 

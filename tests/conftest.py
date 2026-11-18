@@ -11,6 +11,19 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
+# Provider modules are imported during collection. Keep offline tests independent
+# of host proxy configuration before importing those SDKs.
+for proxy_name in (
+    "ALL_PROXY",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "all_proxy",
+    "http_proxy",
+    "https_proxy",
+):
+    os.environ.pop(proxy_name, None)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_config(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
@@ -18,6 +31,12 @@ def _isolate_config(
     """Never read or write the developer's real ~/.config during tests."""
     monkeypatch.setenv("CB_CONFIG_DIR", str(tmp_path_factory.mktemp("cfg")))
     for var in (
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
         "CB_LLM_PROVIDER",
         "CB_LLM_MODEL",
         "CB_OLLAMA_HOST",

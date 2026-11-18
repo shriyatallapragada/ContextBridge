@@ -282,3 +282,96 @@ production defaults. Each observation window lasted approximately four seconds.
 
 These are small-fixture measurements. CPU use varies with project size and ignore
 rules. Increase `--interval` to reduce scan frequency for larger projects.
+
+## Structured handoffs and chat imports
+
+Project handoffs use Goal, Done, Decisions, Current state, Open problems,
+Next steps, and Files to read first. Chat imports use the same core sections
+and a Files section for mentioned filenames. The renderer
+reserves space for essential context before adding file details. Each section
+contains evidence or an explicit statement that nothing was logged.
+
+The default output budget is approximately 2,000 tokens. Override it for one
+handoff with `--budget`, or set `handoff.target_tokens` and
+`handoff.hard_cap_tokens` in `.contextbridge/config.json`. Existing explicit
+project settings continue to apply. Token counts use the app's tokenizer or its
+offline character estimate.
+
+```bash
+cb handoff --to codex --no-llm
+cb handoff --to cursor --budget 1500 --dry-run
+cb handoff --copy --no-llm
+cb handoff --to codex --copy --no-llm
+```
+
+`--from` is optional. The engine uses an explicit value, `CB_AGENT`, a detected
+Codex/Claude environment, or `unknown`. A previous destination is never used
+as evidence of the current agent. Matching source and destination agents produce
+a warning. `--dry-run`
+previews the payload. `--copy` without a destination copies the payload for a
+chatbot. Clipboard support uses macOS, Windows, or an installed Linux clipboard
+utility. Existing adapters retain their marker and ownership checks.
+
+Goal comes from the latest `Goal:` note, the project's package description, or
+the first README paragraph. Recorded notes, commits, and change records supply
+Done. Architecture notes supply Decisions. Todo notes and `Next:` notes supply
+Next steps. The reading list contains at most eight files. Declared entry points, core modules,
+and substantial changes receive priority, with deterministic ties. Known one-line
+edits and deleted files are excluded. Live change magnitude comes from full
+in-memory diffs, independently of display snippet limits. Short descriptions use
+declared entry points and module-name hints. Per-file summaries include recorded
+line or size differences. Optional GUI dependencies are included in the tech stack.
+Tests appear as counts, with the last run's age and a stale marker when a source
+file changed afterward. The engine retains timestamp precision for same-second
+edits and test runs.
+
+```bash
+cb log "Goal: Help students transfer project context between coding tools"
+cb log "Done: Added offline batch capture"
+cb log "Keep the core independent of the UI" --tag architecture
+cb log "Add provider selection" --tag todo
+```
+
+Import a chat without initializing a project. The command reads stdin by default
+and writes Markdown to stdout. File and clipboard input are also available.
+
+```bash
+cb import-chat --file conversation.txt --budget 2000
+cb import-chat --clipboard --copy
+cat conversation.txt | cb import-chat --goal "Continue the implementation"
+```
+
+Offline chat condensation parses User/Assistant, User prompt/Response, and
+You said/ChatGPT said exports into turns. Wrapped prose is joined before
+extraction. Goal preserves the first substantial user request. Current state
+contains the latest user request and a one-line extract from the latest assistant
+response. Done records completion claims in chronological order. Next steps
+contains explicit ending instructions or final open questions. URLs, tool output,
+code blocks, and repeated export lines are filtered. Mentioned filenames appear
+under Files. Chat budgets retain complete statements or show a complete budget
+notice. Sentences are never cut into partial excerpts.
+
+Inputs shorter than approximately 100 words or lacking recognized speaker turns
+produce a warning. Unstructured prose is labeled as imported text, and explicit
+labels can still supply facts. Secrets are redacted before extraction. Input is
+limited to 100,000 characters. The desktop Chat bridge uses the same parser and
+shows input warnings. Clipboard output is labeled as a copied handoff.
+
+The realistic Flutter fixture covers requests for lab observations, project
+creation steps, procedures, HTML output simulations, and later navigation and
+state-management exercises.
+
+```bash
+uv run cb import-chat --file tests/fixtures/flutter_lab_chat.txt --budget 2000
+uv run pytest -q tests/test_chat_turns.py tests/test_handoff_followup.py
+```
+
+The deterministic document is complete without a model. Optional model polishing
+receives only the selected handoff lines. Accepted responses preserve every word,
+path, number, negation, and line order, allowing spacing and final punctuation
+changes. Invalid responses retry once and fall back to the deterministic document.
+This intentionally limits model rewriting so factual wording remains verifiable.
+
+```bash
+uv run pytest -q tests/test_handoff_quality.py tests/test_compressor.py
+```

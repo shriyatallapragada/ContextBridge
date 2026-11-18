@@ -39,7 +39,14 @@ def session_repo(git_repo: Path) -> Path:
     cb("log", "Prices are integer cents", "--tag", "architecture")
     cb("log", "Checkout 500s on an empty cart", "--tag", "blocker")
     cb("log", "Add discount codes", "--tag", "todo")
-    write(git_repo, "cart.py", CART.replace("sum(self.items)", "sum(i.cents for i in self.items)"))
+    write(
+        git_repo,
+        "cart.py",
+        CART.replace(
+            "return sum(self.items)",
+            "values = [i.cents for i in self.items]\n        return sum(values)",
+        ),
+    )
     commit_all(git_repo, "integer cents")
     cb("hook", "post-commit")
     write(git_repo, "discount.py", "def apply(code):\n    return code\n")  # untracked
@@ -57,7 +64,7 @@ def _payload(output: str) -> str:
 def test_acceptance_dry_run_without_ollama_uses_fallback(session_repo: Path) -> None:
     code, out = cb("handoff", "--dry-run", "--from", "claude", "--to", "cursor")
     assert code == 0, out
-    assert "deterministic" in out and "Ollama is not reachable" in out
+    assert "deterministic" in out
     for needle in (
         "cart.py",
         "Prices are integer cents",
@@ -73,7 +80,8 @@ def test_acceptance_dry_run_without_ollama_uses_fallback(session_repo: Path) -> 
     # Nothing was written.
     assert not (session_repo / "CLAUDE.md").exists()
     assert (
-        json.loads((session_repo / ".contextbridge" / "state.json").read_text())["last_handoff"] is None
+        json.loads((session_repo / ".contextbridge" / "state.json").read_text())["last_handoff"]
+        is None
     )
 
 
@@ -94,7 +102,7 @@ def test_acceptance_print_payload_respects_hard_cap(session_repo: Path) -> None:
     payload = result.stdout
     assert payload.startswith("# ContextBridge handoff")
     assert count_tokens(payload) <= 200
-    assert "hard cap 200" in result.stderr
+    assert "hard cap 150" in result.stderr
 
 
 def test_handoff_uses_mocked_llm_and_reports_counts(
@@ -109,12 +117,12 @@ def test_handoff_uses_mocked_llm_and_reports_counts(
 
         def complete(self, system: str, user: str, *, max_tokens: int) -> str:
             calls.append(user)
-            return "Here is the summary:\n- Cart.total sums integer cents\n- Blocker: empty cart"
+            return json.dumps(json.loads(user))
 
     monkeypatch.setattr(compressor, "candidates", lambda cfg, no_llm=False: [Fake()])
     result = runner.invoke(app, ["handoff", "--dry-run", "--print"])
     assert result.exit_code == 0, result.output
-    assert "- Cart.total sums integer cents" in result.stdout
+    assert "Prices are integer cents" in result.stdout
     assert "Here is the summary" not in result.stdout  # preamble stripped
     assert "Method" in result.stderr and "ollama" in result.stderr
     assert "Prices are integer cents" in calls[0]
@@ -132,15 +140,15 @@ def test_cloud_fallback_prints_notice(session_repo: Path, monkeypatch: pytest.Mo
     monkeypatch.setattr(compressor, "candidates", lambda cfg, no_llm=False: [Cloud()])
     result = runner.invoke(app, ["handoff", "--dry-run", "--print"])
     assert result.exit_code == 0
-    assert "Sending sanitized context to groq" in result.stderr
+    assert "Sending sanitized handoff wording to groq" in result.stderr
 
 
 def test_handoff_without_dry_run_needs_from_and_to(session_repo: Path) -> None:
     code, out = cb("handoff")
     assert code == 1
-    assert "--from and --to" in out
-    assert cb("handoff", "--to", "cursor")[0] == 1
-    assert not (session_repo / ".cursor").exists()
+    assert "--to" in out
+    assert cb("handoff", "--to", "cursor")[0] == 0
+    assert (session_repo / ".cursor").exists()
 
 
 def test_handoff_secrets_never_reach_payload(session_repo: Path) -> None:

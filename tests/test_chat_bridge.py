@@ -13,13 +13,13 @@ def test_packet_keeps_goal_and_essentials_within_budget():
     assert len(packet.text) <= 2000
     assert "Finish the plan" in packet.text and "Budget is 300" in packet.text
     assert "latest answer" in packet.text and packet.omitted_chars > 0
-    assert "Earlier text omitted" in packet.text
+    assert "## Decisions" in packet.text and "## Next steps" in packet.text
 
 
 def test_short_chat_preserved_and_secret_redacted():
     packet = build_chat_packet("User: key AKIAIOSFODNN7EXAMPLE\nAssistant: hello", "", "")
     assert "AKIAIOSFODNN7EXAMPLE" not in packet.text
-    assert "Assistant: hello" in packet.text and packet.omitted_chars == 0
+    assert "Latest assistant response — hello." in packet.text and packet.omitted_chars == 0
 
 
 def test_rejects_oversized_or_empty_inputs():

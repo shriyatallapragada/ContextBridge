@@ -119,9 +119,13 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
-def utc_now() -> str:
+def utc_now(*, precise: bool = False) -> str:
     """Current time as a UTC ISO-8601 string (``2026-10-06T21:00:00Z``)."""
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return (
+        datetime.now(UTC)
+        .isoformat(timespec="microseconds" if precise else "seconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def parse_utc(value: str) -> datetime:
@@ -172,6 +176,7 @@ class FileChange:
     symbols: list[dict[str, Any]]
     diff_snippet: str | None
     timestamp: str
+    line_delta: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -511,7 +516,7 @@ class Database:
 
     def add_commit_changes(self, session_id: str, sha: str, files: list[FileDiff]) -> int:
         """All files of a commit are recorded together, including on concurrent retries."""
-        now = utc_now()
+        now = utc_now(precise=True)
         with self.transaction() as conn:
             if self.has_commit(sha):
                 return 0
@@ -542,7 +547,7 @@ class Database:
         notes: str = "",
     ) -> str:
         """Atomically store a batch and path/summary rows for existing context readers."""
-        batch_id, timestamp = new_id("batch"), utc_now()
+        batch_id, timestamp = new_id("batch"), utc_now(precise=True)
         clean = _sanitize_json(files)
         summary = f"{len(files)} files changed in {duration:.1f}s"
         with self.transaction() as conn:
@@ -620,7 +625,7 @@ class Database:
         if change_type not in CHANGE_TYPES:
             raise UserError(f"Invalid change type {change_type!r}.")
         fid = new_id("chg")
-        now = utc_now()
+        now = utc_now(precise=True)
         clean_path = sanitize(file_path)
         clean_symbols = _sanitize_json(symbols or [])
         clean_snippet = sanitize(diff_snippet) if diff_snippet is not None else None
@@ -679,7 +684,7 @@ class Database:
         failures: list[dict[str, str]] | None = None,
     ) -> TestRun:
         tid = new_id("run")
-        now = utc_now()
+        now = utc_now(precise=True)
         clean_command = sanitize(command)
         clean_failures = _sanitize_json((failures or [])[:MAX_STORED_FAILURES])
         try:

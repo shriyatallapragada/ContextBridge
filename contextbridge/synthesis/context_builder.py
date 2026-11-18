@@ -12,8 +12,10 @@ decisions, failing tests and bugs, changed symbols, todos, diff snippets, notes.
 from __future__ import annotations
 
 import logging
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from contextbridge.config import Config
@@ -22,6 +24,14 @@ from contextbridge.core.git_observer import CommitInfo, GitObserver
 from contextbridge.core.sanitizer import sanitize
 from contextbridge.errors import ContextBridgeError
 from contextbridge.storage.db import Database, Decision, FileChange, Session, TestRun, parse_utc
+from contextbridge.synthesis.facts import (
+    diff_line_counts,
+    entrypoint_paths,
+    file_rank,
+    importance,
+    is_test,
+    project_facts,
+)
 from contextbridge.synthesis.token_counter import count_tokens, truncate_to_tokens
 
 log = logging.getLogger("contextbridge")
@@ -70,6 +80,7 @@ class FileSummary:
     snippets: list[str] = field(default_factory=list)  # newest first
     uncommitted: bool = False
     last_changed: str = ""
+    line_delta: tuple[int, int] | None = None
 
 
 @dataclass
@@ -94,6 +105,12 @@ class SessionContext:
     test_run: TestRun | None
     items: list[ContextItem]
     raw_tokens: int = 0
+    goal: str = ""
+    stack: str = ""
+    test_files_changed: int = 0
+    project_files_changed: int = 0
+    entrypoints: set[str] = field(default_factory=set)
+    tests_stale: bool = False
 
     def __post_init__(self) -> None:
         self.raw_tokens = count_tokens(render_items(self.items))
@@ -206,6 +223,8 @@ def merge_file_changes(changes: list[FileChange]) -> list[FileSummary]:
         if change.diff_snippet:
             summary.snippets.insert(0, change.diff_snippet)
         summary.last_changed = change.timestamp
+        if change.line_delta is not None:
+            summary.line_delta = change.line_delta
     for path, summary in by_path.items():
         summary.symbols = sorted(
             symbols[path].values(), key=lambda s: (_CHANGE_RANK.get(s["change"], 3), s["name"])
@@ -246,6 +265,7 @@ def _worktree_changes(observer: GitObserver, session_id: str, config: Config) ->
                 symbols=[{k: sanitize(v) for k, v in s.items()} for s in symbols],
                 diff_snippet=sanitize(change.snippet),
                 timestamp=now,
+                line_delta=diff_line_counts(change.patch),
             )
         )
     return rows
@@ -361,6 +381,7 @@ def build_context(
     project: str,
     observer: GitObserver | None,
     include_worktree: bool = True,
+    root: Path | None = None,
 ) -> SessionContext:
     """Collect everything known about ``session`` into a SessionContext."""
     decisions = db.list_decisions(session.id)
@@ -383,9 +404,29 @@ def build_context(
         for c in commits
     ]
     all_files = merge_file_changes(changes)
+    root = root or (observer.root if observer is not None else None)
+    entrypoints = entrypoint_paths(root) if root else set()
+    all_files.sort(
+        key=lambda item: importance(
+            item.path, item.snippets, entrypoints, line_delta=item.line_delta
+        )
+    )
     limit = config.capture.max_files_per_handoff
     files, omitted = all_files[:limit], max(len(all_files) - limit, 0)
     test_run = db.last_test_run(session.id)
+    root = root or (observer.root if observer is not None else None)
+    goal, stack = project_facts(root) if root else ("", "")
+    stale = False
+    if test_run is not None:
+        tested = parse_utc(test_run.timestamp).timestamp()
+        for item in all_files:
+            if file_rank(item.path) != 0:
+                continue
+            changed = parse_utc(item.last_changed).timestamp()
+            if root is not None:
+                with suppress(OSError):
+                    changed = (root / item.path).stat().st_mtime
+            stale |= changed > tested
     items = _build_items(
         project, sanitize(branch), session, commits, decisions, files, omitted, test_run
     )
@@ -399,4 +440,10 @@ def build_context(
         omitted_files=omitted,
         test_run=test_run,
         items=items,
+        goal=goal,
+        stack=stack,
+        tests_stale=stale,
+        test_files_changed=sum(is_test(item.path) for item in all_files),
+        project_files_changed=sum(not is_test(item.path) for item in all_files),
+        entrypoints=entrypoints,
     )

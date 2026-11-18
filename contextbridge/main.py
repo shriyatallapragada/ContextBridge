@@ -12,6 +12,7 @@ from contextbridge.cli.common import AppContext, console
 from contextbridge.cli.gui_cmd import gui_command
 from contextbridge.cli.handoff_cmd import handoff_command
 from contextbridge.cli.hook_cmd import hook_app
+from contextbridge.cli.import_chat_cmd import import_chat_command
 from contextbridge.cli.init_cmd import init_command
 from contextbridge.cli.log_cmd import log_command
 from contextbridge.cli.run_cmd import run_cmd_command
@@ -59,6 +60,7 @@ app.command("status")(status_command)
 app.command("watch")(watch_command)
 app.command("run", context_settings={"ignore_unknown_options": True})(run_cmd_command)
 app.command("handoff")(handoff_command)
+app.command("import-chat")(import_chat_command)
 app.command("search")(search_command)
 app.command("clear")(clear_command)
 app.command("gui")(gui_command)

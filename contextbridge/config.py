@@ -30,10 +30,9 @@ API_KEY_ENV = {"groq": "GROQ_API_KEY", "openai": "OPENAI_API_KEY"}
 DEFAULT_CLOUD_MODELS = {"groq": "llama-3.1-8b-instant", "openai": "gpt-4o-mini"}
 
 DEFAULT_SYSTEM_PROMPT = (
-    "You are a senior systems architect creating an emergency session handoff. "
-    "Summarize the completed work, modified files (with key symbols), architectural "
-    "decisions, failing tests, and current blockers into a hyper-dense, bulleted summary "
-    "under 400 tokens. Do not invent details not present in the input."
+    "Polish the supplied handoff lines while preserving their evidence. "
+    "Return JSON containing the same lines, with spacing and final punctuation improved. "
+    "Preserve all words, paths, numbers, negations and their order."
 )
 
 # Keys that must never be persisted to a config file, even if a user adds them.
@@ -68,8 +67,8 @@ class CaptureConfig:
 
 @dataclass
 class HandoffConfig:
-    target_tokens: int = 400
-    hard_cap_tokens: int = 600
+    target_tokens: int = 2000
+    hard_cap_tokens: int = 2000
     # Cap on the context sent to the model; lowest-priority content is cut first.
     max_input_tokens: int = 12000
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
