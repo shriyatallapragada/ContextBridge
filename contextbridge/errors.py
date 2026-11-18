@@ -46,7 +46,7 @@ class EnvironmentProblemError(ContextBridgeError):
 class NotInitializedError(EnvironmentProblemError):
     def __init__(self, start: str) -> None:
         super().__init__(
-            f"No .context/ directory found in {start} or any parent directory.",
+            f"No .contextbridge/ or .context/ directory found in {start} or any parent directory.",
             hint="Run `cb init` at the root of your project.",
         )
 

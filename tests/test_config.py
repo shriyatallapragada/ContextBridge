@@ -15,12 +15,12 @@ def test_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cfg == Config()
     assert cfg.llm.provider == "ollama"
     assert cfg.handoff.target_tokens == 400
-    assert ".context/**" in cfg.capture.ignore_globs
+    assert ".contextbridge/**" in cfg.capture.ignore_globs
 
 
 def test_project_overrides_global(tmp_path: Path) -> None:
     save_config({"llm": {"model": "global-model", "timeout_seconds": 5}}, global_config_path())
-    ctx = tmp_path / ".context"
+    ctx = tmp_path / ".contextbridge"
     save_config({"llm": {"model": "project-model"}}, ctx / "config.json")
     cfg = load_config(ctx)
     assert cfg.llm.model == "project-model"
@@ -46,14 +46,14 @@ def test_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     ],
 )
 def test_invalid_config(tmp_path: Path, data: dict[str, object]) -> None:
-    ctx = tmp_path / ".context"
+    ctx = tmp_path / ".contextbridge"
     save_config(data, ctx / "config.json")
     with pytest.raises(ConfigError):
         load_config(ctx)
 
 
 def test_malformed_json(tmp_path: Path) -> None:
-    ctx = tmp_path / ".context"
+    ctx = tmp_path / ".contextbridge"
     ctx.mkdir()
     (ctx / "config.json").write_text("{not json")
     with pytest.raises(ConfigError):

@@ -21,7 +21,7 @@ from contextbridge.core.git_observer import (
 from contextbridge.errors import NotAGitRepoError
 from tests.helpers import commit_all, git, write
 
-IGNORE = ["*.lock", "node_modules/**", "dist/**", "*.min.js", ".context/**"]
+IGNORE = ["*.lock", "node_modules/**", "dist/**", "*.min.js", ".contextbridge/**"]
 
 
 @pytest.fixture

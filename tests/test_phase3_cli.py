@@ -59,7 +59,7 @@ def test_acceptance_dry_run_without_ollama_uses_fallback(session_repo: Path) -> 
     assert code == 0, out
     assert "deterministic" in out and "Ollama is not reachable" in out
     for needle in (
-        "Cart.total",
+        "cart.py",
         "Prices are integer cents",
         "Checkout 500s on an empty cart",
         "Add discount codes",
@@ -73,12 +73,12 @@ def test_acceptance_dry_run_without_ollama_uses_fallback(session_repo: Path) -> 
     # Nothing was written.
     assert not (session_repo / "CLAUDE.md").exists()
     assert (
-        json.loads((session_repo / ".context" / "state.json").read_text())["last_handoff"] is None
+        json.loads((session_repo / ".contextbridge" / "state.json").read_text())["last_handoff"] is None
     )
 
 
 def test_acceptance_print_payload_respects_hard_cap(session_repo: Path) -> None:
-    cfg_path = session_repo / ".context" / "config.json"
+    cfg_path = session_repo / ".contextbridge" / "config.json"
     cfg_path.write_text(json.dumps({"handoff": {"target_tokens": 150, "hard_cap_tokens": 200}}))
     # A big session: many files and long diffs.
     for i in range(40):
@@ -169,7 +169,7 @@ def test_status_dashboard(session_repo: Path) -> None:
         "Commits",
         "Changed files",
         "cart.py",
-        "Cart.total",
+        "cart.py",
         "discount.py",
         "uncommitted",
         "Last test run",
@@ -207,7 +207,9 @@ def test_keyword_search(session_repo: Path) -> None:
     assert result.exit_code == 0
     assert "Keyword search" in result.stderr
     assert "Prices are integer cents" in result.stdout
-    assert "cart.py" in result.stdout  # the diff snippet matched too
+    # Source text is absent from automatic records. Paths remain searchable.
+    paths = runner.invoke(app, ["search", "cart.py"])
+    assert paths.exit_code == 0 and "cart.py" in paths.stdout
 
 
 def test_keyword_search_escapes_wildcards(session_repo: Path) -> None:
@@ -221,7 +223,7 @@ def test_vector_enabled_but_unavailable_falls_back(
 ) -> None:
     import contextbridge.cli.search_cmd as search_cmd
 
-    (session_repo / ".context" / "config.json").write_text(
+    (session_repo / ".contextbridge" / "config.json").write_text(
         json.dumps({"vector": {"enabled": True}})
     )
 
@@ -280,7 +282,7 @@ def test_semantic_search_with_vector_store(
         real_init(self, path, embedding_function=_hash_embedding())
 
     monkeypatch.setattr(vs.VectorStore, "__init__", init)
-    (session_repo / ".context" / "config.json").write_text(
+    (session_repo / ".contextbridge" / "config.json").write_text(
         json.dumps({"vector": {"enabled": True}})
     )
     result = runner.invoke(app, ["search", "empty cart checkout"])
@@ -288,7 +290,7 @@ def test_semantic_search_with_vector_store(
     assert "Semantic results" in result.stdout
     first_row = next(ln for ln in result.stdout.splitlines() if "decision" in ln)
     assert "Checkout 500s" in first_row
-    assert (session_repo / ".context" / "vector_db").is_dir()
+    assert (session_repo / ".contextbridge" / "vector_db").is_dir()
 
     # Lazy, incremental indexing: only new rows are embedded on the next search.
     from contextbridge.storage.workspace import Workspace

@@ -15,10 +15,14 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from contextbridge.core.sanitizer import sanitize
 from contextbridge.errors import StorageError, UserError
+
+if TYPE_CHECKING:
+    from contextbridge.core.git_observer import FileDiff
+
 
 SESSION_STATUSES: Final = ("active", "archived", "handed_off")
 DECISION_TAGS: Final = ("note", "bug", "architecture", "blocker", "todo")
@@ -93,7 +97,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_changes_commit_file
 """
 
 # Index i holds the script that upgrades the schema from version i to i + 1.
-MIGRATIONS: Final[tuple[str, ...]] = (_MIGRATION_1, _MIGRATION_2)
+_MIGRATION_3: Final = """
+CREATE TABLE IF NOT EXISTS change_batches (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  timestamp TEXT NOT NULL,
+  duration_seconds REAL NOT NULL,
+  event_count INTEGER NOT NULL,
+  files TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  agent TEXT,
+  notes TEXT NOT NULL
+);
+"""
+MIGRATIONS: Final[tuple[str, ...]] = (_MIGRATION_1, _MIGRATION_2, _MIGRATION_3)
 SCHEMA_VERSION: Final = len(MIGRATIONS)
 
 
@@ -471,7 +488,14 @@ class Database:
 
     def count_all(self) -> dict[str, int]:
         """Row counts of everything `cb clear --all` would delete."""
-        tables = ("sessions", "decision_logs", "file_changes", "test_runs", "handoffs")
+        tables = (
+            "sessions",
+            "decision_logs",
+            "file_changes",
+            "test_runs",
+            "handoffs",
+            "change_batches",
+        )
         return {
             t: int(self.conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]) for t in tables
         }
@@ -484,6 +508,77 @@ class Database:
             conn.execute("DELETE FROM handoffs")
             conn.execute("DELETE FROM sessions")  # cascades to decisions/changes/test runs
         return counts
+
+    def add_commit_changes(self, session_id: str, sha: str, files: list[FileDiff]) -> int:
+        """All files of a commit are recorded together, including on concurrent retries."""
+        now = utc_now()
+        with self.transaction() as conn:
+            if self.has_commit(sha):
+                return 0
+            for item in files:
+                conn.execute(
+                    "INSERT INTO file_changes (id, session_id, commit_sha, file_path, change_type, "
+                    "symbols_modified, diff_snippet, timestamp) VALUES (?, ?, ?, ?, ?, '[]', ?, ?)",
+                    (
+                        new_id("chg"),
+                        session_id,
+                        sha,
+                        sanitize(item.path),
+                        item.change_type.value,
+                        item.snippet,
+                        now,
+                    ),
+                )
+            conn.execute("UPDATE sessions SET last_updated = ? WHERE id = ?", (now, session_id))
+        return len(files)
+
+    def add_change_batch(
+        self,
+        session_id: str,
+        files: list[dict[str, str]],
+        duration: float,
+        event_count: int,
+        agent: str | None = None,
+        notes: str = "",
+    ) -> str:
+        """Atomically store a batch and path/summary rows for existing context readers."""
+        batch_id, timestamp = new_id("batch"), utc_now()
+        clean = _sanitize_json(files)
+        summary = f"{len(files)} files changed in {duration:.1f}s"
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT INTO change_batches VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    batch_id,
+                    session_id,
+                    timestamp,
+                    duration,
+                    event_count,
+                    json.dumps(clean),
+                    summary,
+                    sanitize(agent) if agent else None,
+                    sanitize(notes),
+                ),
+            )
+            for item in clean:
+                conn.execute(
+                    "INSERT INTO file_changes "
+                    "(id, session_id, file_path, change_type, symbols_modified, "
+                    "diff_snippet, timestamp) "
+                    "VALUES (?, ?, ?, ?, '[]', ?, ?)",
+                    (
+                        new_id("chg"),
+                        session_id,
+                        item["path"],
+                        item["change_type"],
+                        item["summary"],
+                        timestamp,
+                    ),
+                )
+            conn.execute(
+                "UPDATE sessions SET last_updated = ? WHERE id = ?", (timestamp, session_id)
+            )
+        return summary
 
     # ----- file changes ----------------------------------------------------
 

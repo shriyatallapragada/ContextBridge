@@ -115,7 +115,7 @@ def ready(shell: Shell, project: Path) -> Shell:
 
 
 def db(project: Path, sql: str) -> list[tuple[Any, ...]]:
-    conn = sqlite3.connect(project / ".context" / "state.db")
+    conn = sqlite3.connect(project / ".contextbridge" / "state.db")
     try:
         return conn.execute(sql).fetchall()
     finally:
@@ -172,16 +172,16 @@ def test_opening_a_project_offers_one_click_setup(shell: Shell, project: Path) -
     assert shell.window.project_name.text() == project.name
     home = shell.page("home")
     assert has_button(home, "Set up this project")
-    assert not (project / ".context").exists()  # nothing happens until you click
+    assert not (project / ".contextbridge").exists()  # nothing happens until you click
 
 
 def test_setup_creates_workspace_and_installs_the_hook(shell: Shell, project: Path) -> None:
     shell.open(project)
     find_button(shell.page("home"), "Set up this project").click()
     shell.settle()
-    assert (project / ".context" / "state.db").is_file()
+    assert (project / ".contextbridge" / "state.db").is_file()
     assert "contextbridge:start" not in (project / ".gitignore").read_text()
-    assert ".context/" in (project / ".gitignore").read_text()
+    assert ".contextbridge/" in (project / ".gitignore").read_text()
     assert "# >>> contextbridge >>>" in (project / ".git" / "hooks" / "post-commit").read_text()
     home = shell.page("home")
     assert has_button(home, "Hand off to another assistant")
@@ -195,7 +195,7 @@ def test_setup_can_skip_the_hook(shell: Shell, project: Path) -> None:
     home.hook_checkbox.setChecked(False)
     find_button(home, "Set up this project").click()
     shell.settle()
-    assert (project / ".context").is_dir()
+    assert (project / ".contextbridge").is_dir()
     assert not (project / ".git" / "hooks" / "post-commit").exists()
 
 
@@ -207,7 +207,7 @@ def test_setup_in_a_folder_without_git(shell: Shell, tmp_path: Path) -> None:
     assert home.hook_checkbox is not None and not home.hook_checkbox.isEnabled()
     find_button(home, "Set up this project").click()
     shell.settle()
-    assert (folder / ".context" / "state.db").is_file()
+    assert (folder / ".contextbridge" / "state.db").is_file()
     assert not shell.dialogs  # no error for a folder that isn't a git repo
 
 
@@ -443,7 +443,7 @@ def test_full_handoff_flow(ready: Shell, project: Path, agent: str, relative: st
     assert relative in handoff.done_text.text()
     rows = db(project, "SELECT to_agent, written_path FROM handoffs")
     assert rows == [(agent, relative)]
-    state = json.loads((project / ".context" / "state.json").read_text())
+    state = json.loads((project / ".contextbridge" / "state.json").read_text())
     assert state["last_handoff"]["to"] == agent
     home = ready.page("home")
     assert any("Last handoff" in lab.text() for lab in home.findChildren(QLabel))
@@ -564,7 +564,7 @@ def test_ai_choice_is_saved_and_used(ready: Shell, project: Path) -> None:
     assert settings.local_radio.isChecked() and settings.model_row.isVisibleTo(settings)
     settings.off_radio.setChecked(True)
     ready.settle()
-    config = json.loads((project / ".context" / "config.json").read_text())
+    config = json.loads((project / ".contextbridge" / "config.json").read_text())
     assert config["llm"]["provider"] == "none"
     assert not settings.model_row.isVisibleTo(settings)
     handoff = ready.page("handoff")
@@ -589,7 +589,7 @@ def test_model_name_is_saved(ready: Shell, project: Path) -> None:
     settings.model_edit.editingFinished.emit()
     ready.settle()
     assert (
-        json.loads((project / ".context" / "config.json").read_text())["llm"]["model"]
+        json.loads((project / ".contextbridge" / "config.json").read_text())["llm"]["model"]
         == "llama3:8b"
     )
 
@@ -604,7 +604,7 @@ def test_check_connection_reports_in_plain_words(ready: Shell) -> None:
 
 
 def test_cloud_setup_is_shown_read_only(ready: Shell, project: Path) -> None:
-    (project / ".context" / "config.json").write_text(json.dumps({"llm": {"provider": "groq"}}))
+    (project / ".contextbridge" / "config.json").write_text(json.dumps({"llm": {"provider": "groq"}}))
     ready.window.refresh()
     ready.settle()
     settings = ready.page("settings")
@@ -642,7 +642,7 @@ def test_existing_hook_that_cannot_be_extended_is_explained(ready: Shell, projec
 
 
 def test_start_a_new_work_session(ready: Shell, project: Path) -> None:
-    before = json.loads((project / ".context" / "state.json").read_text())["active_session_id"]
+    before = json.loads((project / ".contextbridge" / "state.json").read_text())["active_session_id"]
     settings = ready.page("settings")
     find_button(settings, "Start a new work session").click()
     ready.settle()

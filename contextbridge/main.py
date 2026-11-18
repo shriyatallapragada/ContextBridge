@@ -17,6 +17,7 @@ from contextbridge.cli.log_cmd import log_command
 from contextbridge.cli.run_cmd import run_cmd_command
 from contextbridge.cli.search_cmd import search_command
 from contextbridge.cli.status_cmd import status_command
+from contextbridge.cli.watch_cmd import watch_command
 
 app = typer.Typer(
     name="cb",
@@ -55,6 +56,7 @@ def main(
 app.command("init")(init_command)
 app.command("log")(log_command)
 app.command("status")(status_command)
+app.command("watch")(watch_command)
 app.command("run", context_settings={"ignore_unknown_options": True})(run_cmd_command)
 app.command("handoff")(handoff_command)
 app.command("search")(search_command)

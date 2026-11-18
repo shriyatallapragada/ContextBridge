@@ -615,6 +615,7 @@ source = { editable = "." }
 dependencies = [
     { name = "ollama" },
     { name = "platformdirs" },
+    { name = "pathspec" },
     { name = "rich" },
     { name = "tiktoken" },
     { name = "tree-sitter" },
@@ -652,6 +653,7 @@ requires-dist = [
     { name = "ollama", specifier = ">=0.3" },
     { name = "openai", marker = "extra == 'cloud'", specifier = ">=1.30" },
     { name = "platformdirs", specifier = ">=4.2" },
+    { name = "pathspec", specifier = ">=0.12,<2" },
     { name = "pyinstaller", marker = "extra == 'build'", specifier = ">=6.22,<7" },
     { name = "pypdf", marker = "extra == 'gui'", specifier = ">=6,<7" },
     { name = "pyside6-essentials", marker = "extra == 'gui'", specifier = ">=6.12,<6.13" },

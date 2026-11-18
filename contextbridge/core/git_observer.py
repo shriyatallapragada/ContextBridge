@@ -446,6 +446,45 @@ class GitObserver:
             max_files=max_files,
         )
 
+    def numeric_changes(self, base: str, target: str) -> list[FileDiff]:
+        """Collect paths, kinds and line counts without requesting any patch bodies."""
+        stats: dict[str, str] = {}
+        output = self.git(
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--numstat",
+            "-z",
+            base,
+            target,
+        )
+        for item in output.split("\0"):
+            if not item:
+                continue
+            added, removed, path = item.split("\t", 2)
+            stats[path] = (
+                "binary file changed" if added == "-" else f"+{int(added)} / -{int(removed)} lines"
+            )
+        fields = iter(
+            self.git(
+                "diff", "--no-ext-diff", "--no-textconv", "-M", "--name-status", "-z", base, target
+            ).split("\0")
+        )
+        changes = []
+        for code in fields:
+            if not code:
+                continue
+            path = next(fields)
+            old_path = None
+            if code[0] in "RC":
+                old_path, path = path, next(fields)
+            kind = {"A": ChangeType.added, "D": ChangeType.deleted, "R": ChangeType.renamed}.get(
+                code[0], ChangeType.modified
+            )
+            changes.append(FileDiff(path, kind, old_path, snippet=stats.get(path, "path changed")))
+        return changes
+
     def diff(
         self,
         base: str,

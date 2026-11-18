@@ -23,12 +23,12 @@ def cb(*args: str, input: str | None = None) -> tuple[int, str]:
 
 
 def _state(repo: Path) -> dict[str, Any]:
-    data: dict[str, Any] = json.loads((repo / ".context" / "state.json").read_text())
+    data: dict[str, Any] = json.loads((repo / ".contextbridge" / "state.json").read_text())
     return data
 
 
 def _rows(repo: Path, sql: str) -> list[sqlite3.Row]:
-    conn = sqlite3.connect(repo / ".context" / "state.db")
+    conn = sqlite3.connect(repo / ".contextbridge" / "state.db")
     conn.row_factory = sqlite3.Row
     try:
         return conn.execute(sql).fetchall()
@@ -72,7 +72,8 @@ def test_acceptance_handoff_writes_the_right_file(repo: Path, agent: str, relati
     text = target.read_text()
     assert MARKER_START in text
     assert "Prices are integer cents" in text and "Empty cart crashes checkout" in text
-    assert "cart.py" in text and "total" in text
+    assert "cart.py" in text
+    assert "def total" not in text
     others = {"CLAUDE.md", ".cursor/rules/handoff.mdc", "HANDOFF.md"} - {relative}
     assert not any((repo / o).exists() for o in others)  # only the target was written
     assert f"wrote {relative}" in out.replace("\n", " ") or relative in out
@@ -197,7 +198,7 @@ def test_secrets_never_reach_the_files_or_database(repo: Path) -> None:
             p.read_bytes()
             for p in (repo / "CLAUDE.md", repo / "HANDOFF.md", repo / ".cursor/rules/handoff.mdc")
         )
-        + (repo / ".context" / "state.db").read_bytes()
+        + (repo / ".contextbridge" / "state.db").read_bytes()
     )
     for secret in (b"AKIAIOSFODNN7EXAMPLE", b"ghp_", b"hunter2"):
         assert secret not in blob
@@ -263,7 +264,7 @@ def test_clear_all_asks_for_confirmation(repo: Path) -> None:
 
 def test_clear_all_confirmed_deletes_everything(repo: Path) -> None:
     cb("handoff", "--from", "a", "--to", "generic")
-    vector = repo / ".context" / "vector_db"
+    vector = repo / ".contextbridge" / "vector_db"
     vector.mkdir()
     (vector / "index.bin").write_bytes(b"x")
     code, out = cb("clear", "--all", input="y\n")
@@ -273,7 +274,7 @@ def test_clear_all_confirmed_deletes_everything(repo: Path) -> None:
     state = _state(repo)
     assert state["active_session_id"] is None and state["last_handoff"] is None
     assert not vector.exists()
-    assert (repo / ".context" / "config.json").exists()  # config survives
+    assert (repo / ".contextbridge" / "config.json").exists()  # config survives
     assert (repo / "HANDOFF.md").exists()  # agent files survive without --cleanup-adapters
     assert cb("log", "after clear")[0] == 0  # the workspace still works
 

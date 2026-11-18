@@ -61,7 +61,7 @@ def cb(repo: Path, *args: str, expect: int = 0) -> subprocess.CompletedProcess[s
 
 
 def state(repo: Path) -> dict[str, object]:
-    data: dict[str, object] = json.loads((repo / ".context" / "state.json").read_text())
+    data: dict[str, object] = json.loads((repo / ".contextbridge" / "state.json").read_text())
     return data
 
 
@@ -104,9 +104,9 @@ def test_full_workflow(project: Path) -> None:
     status = cb(repo, "status").stdout
     # (The test counts are asserted from the database below: the status panel wraps the
     # long command line, so its text depends on the width of the interpreter path.)
-    for needle in ("integer cents", "Empty cart crashes", "Cart.total", "Last test run"):
+    for needle in ("integer cents", "Empty cart crashes", "cart.py", "Last test run"):
         assert needle in status, needle
-    conn = sqlite3.connect(repo / ".context" / "state.db")
+    conn = sqlite3.connect(repo / ".contextbridge" / "state.db")
     try:
         run = conn.execute("SELECT passed, failed, skipped FROM test_runs").fetchall()
     finally:
@@ -141,7 +141,7 @@ def test_full_workflow(project: Path) -> None:
         for needle in ("integer cents", "Empty cart crashes checkout", "Add discount codes"):
             assert needle in text, (agent, needle)
         assert "tests/test_cart.py::test_empty_cart_total" in text, agent
-        assert "Cart.total" in text, agent
+        assert "cart.py" in text, agent
         assert "context_handoff" not in text or agent == "claude"
     claude_text = expected["claude"].read_text()
     assert claude_text.startswith(original_claude_md)  # user rules untouched, block appended
@@ -150,7 +150,7 @@ def test_full_workflow(project: Path) -> None:
     # bookkeeping: handoffs table and last_handoff
     last = state(repo)["last_handoff"]
     assert isinstance(last, dict) and last["to"] == "generic" and last["method"] == "deterministic"
-    conn = sqlite3.connect(repo / ".context" / "state.db")
+    conn = sqlite3.connect(repo / ".contextbridge" / "state.db")
     try:
         db = conn.execute("SELECT to_agent, written_path FROM handoffs").fetchall()
     finally:

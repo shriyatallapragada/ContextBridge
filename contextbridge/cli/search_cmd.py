@@ -52,7 +52,7 @@ def search_command(
                 )
         else:
             err_console.print(
-                "[dim]Keyword search (set vector.enabled in .context/config.json for "
+                "[dim]Keyword search (set vector.enabled in .contextbridge/config.json for "
                 "semantic search).[/]"
             )
         if hits is None:

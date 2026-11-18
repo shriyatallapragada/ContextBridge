@@ -82,14 +82,14 @@ def test_cli_mode_records_a_commit_like_the_hook_does(git_repo: Path) -> None:
     with pytest.raises(SystemExit) as done:
         gui_app.main(["--cli", "hook", "post-commit"])
     assert done.value.code == 0
-    conn = sqlite3.connect(git_repo / ".context" / "state.db")
+    conn = sqlite3.connect(git_repo / ".contextbridge" / "state.db")
     try:
         rows = conn.execute(
             "SELECT file_path, symbols_modified FROM file_changes WHERE commit_sha = ?", (sha,)
         ).fetchall()
     finally:
         conn.close()
-    assert rows and rows[0][0] == "svc.py" and '"a"' in rows[0][1]
+    assert rows and rows[0][0] == "svc.py" and rows[0][1] == "[]"
 
 
 def test_version_flag(capsys: pytest.CaptureFixture[str]) -> None:

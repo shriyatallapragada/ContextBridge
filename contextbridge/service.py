@@ -280,7 +280,7 @@ class ProjectService:
     # ----- setup -------------------------------------------------------------------------
 
     def init(self, *, install_hook: bool = True, verbose: bool = False) -> InitResult:
-        """Create `.context/`, the database and a session; optionally install the hook."""
+        """Create `.contextbridge/`, the database and a session; optionally install the hook."""
         ws, created_dir = Workspace.create(self.root)
         ws.setup_logging(verbose=verbose)
         ws.load_config()  # Fail early on an invalid config file.

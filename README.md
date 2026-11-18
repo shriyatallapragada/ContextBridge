@@ -45,7 +45,7 @@ Requires Python 3.11+ and `git`. Optional extras: `gui` (the desktop app), `vect
 
 ```bash
 cd your-project
-cb init                                   # creates .context/, installs a git hook
+cb init                                   # creates .contextbridge/, installs a git hook
 cb log "Prices are integer cents" --tag architecture
 cb log "Empty cart crashes checkout" --tag blocker
 # ...work, commit as usual: the hook records changed files and functions...
@@ -60,7 +60,7 @@ No LLM is needed. Without one, the handoff is built from a deterministic templat
 
 | Command | What it does |
 |---|---|
-| `cb init [--no-hooks] [--uninstall-hooks]` | Create `.context/`, add it to `.gitignore`, install the post-commit hook, start a session. Safe to repeat |
+| `cb init [--no-hooks] [--uninstall-hooks]` | Create `.contextbridge/`, add it to `.gitignore`, install the post-commit hook, start a session. Safe to repeat |
 | `cb log "msg" [--tag note\|bug\|architecture\|blocker\|todo]` | Record a note in the current session |
 | `cb run -- <cmd>` | Run a command, stream its output, record pytest/jest/vitest/`go test`/`cargo test` results |
 | `cb status` | Dashboard: branch, changes and symbols, tests, decisions, last handoff, token stats |
@@ -122,7 +122,7 @@ always computed from real counts.
 
 ## Configuration
 
-`~/.config/contextbridge/config.json` (global) and `.context/config.json` (per project;
+`~/.config/contextbridge/config.json` (global) and `.contextbridge/config.json` (per project;
 wins). Example:
 
 ```json
@@ -139,7 +139,7 @@ database.
 
 ## Privacy
 
-- Everything is stored locally in `.context/` (gitignored). Nothing leaves your machine
+- Everything is stored locally in `.contextbridge/` (gitignored). Nothing leaves your machine
   unless you opt in to a cloud provider.
 - Every piece of text passes through the sanitizer before it is stored, logged, put in a
   prompt, or written to an agent file. It redacts cloud and API keys, tokens, JWTs,
@@ -152,10 +152,10 @@ database.
 
 ## Troubleshooting
 
-- **"No .context/ directory found"**: run `cb init` at the project root.
+- **"No .contextbridge/ directory found"**: run `cb init` at the project root.
 - **Commits are not being recorded**: check `cb init` did not report a skipped hook (an
   existing non-executable or non-shell `post-commit` hook is left untouched), and look at
-  `.context/cb.log`. `cb hook post-commit` can be run by hand after a commit.
+  `.contextbridge/cb.log`. `cb hook post-commit` can be run by hand after a commit.
 - **The hook runs the wrong `cb`**: the hook uses the Python that ran `cb init` first.
   Re-run `cb init` from the environment you want.
 - **"Ollama is not reachable"**: expected when it is not running; the deterministic
@@ -207,6 +207,78 @@ Run the CLI with `uv run cb --help`, or launch the desktop app with
 `uv run pytest -q tests/test_engine_boundary.py tests/test_service.py`.
 
 The next stages will add the watcher, optional provider setup, and local API.
-The folder migration will copy existing `.context/` data and retain legacy reads.
+The folder migration will copy existing `.contextbridge/` data and retain legacy reads.
 The API will bind to `127.0.0.1` and authenticate every request with a random
 per-session token. The first desktop packaging target is macOS, with signing deferred.
+
+## Offline change watching and retained legacy storage
+
+Initialize a project, then explicitly start watching in a terminal.
+
+```bash
+uv run cb init
+uv run cb watch --agent codex --note "Working on the settings page"
+```
+
+Press Ctrl-C to flush pending changes and stop. Watching runs only for the lifetime
+of this foreground command. Opening the desktop app or running another command
+starts no watcher. `--seconds 60` provides a bounded run.
+
+The defaults poll metadata once per second, save after two quiet seconds, and
+close a continuing batch after 30 seconds. Tune them with `--interval`,
+`--debounce`, and `--batch-window`. Repeated saves to a path share one record in
+the batch. A batch includes its timestamp, observed event count, elapsed time,
+paths, change types, size differences, and optional tool attribution and notes.
+Commit capture records numeric added/removed line counts. Automatic capture
+stores no source text, patch bodies, or function signatures. Existing saved
+history is retained. Notes and handoffs remain user-requested text records.
+
+The watcher prunes `.contextbridge/`, `.context/`, `.git/`, dependencies, virtual
+environments, build and cache directories. It excludes `AGENTS.md`, `HANDOFF.md`,
+`CLAUDE.md`, Cursor handoff output, `cb.log`, secret files, and symlinks. Root and
+nested `.gitignore` rules apply, including negations. Source files are statted,
+never opened. Change batches and their handoff-facing file records are committed
+in one SQLite transaction. A restart establishes a fresh baseline.
+
+Event counts describe eligible file transitions observed between polls. Several
+saves between two scans can coalesce. Renames appear as a deleted path and an
+added path in watch batches. Saves made while watching is stopped are outside
+the watch session. Commit capture continues to be available through the existing
+Git hook.
+
+New projects use `.contextbridge/`. Existing `.context/` projects remain readable.
+Running `cb init` copies the old folder into a temporary directory, uses SQLite
+backup to include committed WAL data, verifies the copied database, and publishes
+the complete `.contextbridge/` directory. The old folder is retained. Repeating
+init preserves the current database. If a conflicting new folder exists without
+a database, it is preserved and legacy discovery continues to work. Once both
+folders contain databases, current storage takes precedence. Both folders are
+added to `.gitignore`.
+
+Run regression and burst checks with the development environment installed.
+
+```bash
+uv run pytest -q tests/test_watcher.py tests/test_workspace_migration.py
+uv run pytest -q -s tests/test_watcher_bursts.py
+```
+
+Burst checks run actual Ruff formatting, Git checkout, Git pull from a local
+repository, and offline `uv sync` installing a local wheel. Each source burst
+changes 150 files. Measurements use `time.thread_time()` for the watcher thread
+and wall time, reported as a percentage of one logical CPU. They exclude CPU
+used by the commands creating the burst and by Git subprocesses. The tests print
+scan, event, batch, and recorded-path counts for each run.
+
+The macOS measurement run on 18 November 2026 produced these results with the
+production defaults. Each observation window lasted approximately four seconds.
+
+| Scenario | Observed changes | Batches | Watcher CPU, one core |
+|---|---:|---:|---:|
+| Idle, 150 source files | 0 | 0 | 2.54% |
+| Ruff format, 150 files | 150 | 1 | 3.17% |
+| Git checkout, 150 files | 150 | 1 | 3.14% |
+| Git pull from local repository, 150 files | 150 | 1 | 3.07% |
+| Offline uv sync, 150 installed modules | 0 | 0 | 0.30% |
+
+These are small-fixture measurements. CPU use varies with project size and ignore
+rules. Increase `--interval` to reduce scan frequency for larger projects.

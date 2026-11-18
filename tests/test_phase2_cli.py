@@ -27,7 +27,7 @@ def cb(*args: str) -> tuple[int, str]:
 
 
 def _rows(repo: Path, sql: str) -> list[sqlite3.Row]:
-    conn = sqlite3.connect(repo / ".context" / "state.db")
+    conn = sqlite3.connect(repo / ".contextbridge" / "state.db")
     conn.row_factory = sqlite3.Row
     try:
         return conn.execute(sql).fetchall()
@@ -88,18 +88,11 @@ def test_acceptance_commit_records_edited_function(initialized: Path) -> None:
     assert change["commit_sha"] == sha
     assert change["file_path"] == "service.py"
     assert change["change_type"] == "modified"
-    assert change["symbols"] == [
-        {
-            "name": "create_user",
-            "kind": "function",
-            "change": "modified",
-            "signature": "def create_user(name)",
-        }
-    ]
-    assert "@@" in change["diff_snippet"]
+    assert change["symbols"] == []
+    assert change["diff_snippet"] == "+1 / -1 lines"
     assert (
         change["session_id"]
-        == json.loads((repo / ".context" / "state.json").read_text())["active_session_id"]
+        == json.loads((repo / ".contextbridge" / "state.json").read_text())["active_session_id"]
     )
 
 
@@ -127,12 +120,8 @@ def test_hook_backfills_commits_since_last_recorded(initialized: Path) -> None:
         (second, "b.py"),
         (third, "c.py"),
     ]
-    assert changes[1]["symbols"][0] == {
-        "name": "b",
-        "kind": "function",
-        "change": "added",
-        "signature": "def b()",
-    }
+    assert changes[1]["symbols"] == []
+    assert changes[1]["diff_snippet"] == "+2 / -0 lines"
 
 
 def test_first_hook_run_does_not_record_pre_init_commits(git_repo: Path) -> None:
@@ -159,7 +148,7 @@ def test_acceptance_binary_and_ignored_files_skipped(initialized: Path) -> None:
 
 
 def test_custom_ignore_globs_from_config(initialized: Path) -> None:
-    (initialized / ".context" / "config.json").write_text(
+    (initialized / ".contextbridge" / "config.json").write_text(
         json.dumps({"capture": {"ignore_globs": ["generated/**"]}})
     )
     write(initialized, "generated/api.py", "x = 1\n")
@@ -169,8 +158,8 @@ def test_custom_ignore_globs_from_config(initialized: Path) -> None:
     assert [c["file_path"] for c in _changes(initialized)] == ["real.py"]
 
 
-def test_diff_snippet_sanitized_and_truncated(initialized: Path) -> None:
-    (initialized / ".context" / "config.json").write_text(
+def test_commit_stores_only_numeric_diff_summary(initialized: Path) -> None:
+    (initialized / ".contextbridge" / "config.json").write_text(
         json.dumps({"capture": {"max_diff_chars_per_file": 300}})
     )
     body = "".join(f"value_{i} = {i}\n" for i in range(200))
@@ -180,10 +169,8 @@ def test_diff_snippet_sanitized_and_truncated(initialized: Path) -> None:
     [change] = _changes(initialized)
     snippet = change["diff_snippet"]
     assert "AKIAIOSFODNN7EXAMPLE" not in snippet
-    assert "[REDACTED:aws_access_key]" in snippet
-    assert "@@ -0,0 +1,201 @@" in snippet
-    assert "truncated" in snippet
-    assert len(snippet) < 600
+    assert snippet == "+201 / -0 lines"
+    assert "value_" not in snippet
 
 
 def test_hook_rename_records_new_path(initialized: Path) -> None:
@@ -197,7 +184,7 @@ def test_hook_rename_records_new_path(initialized: Path) -> None:
 
 def test_branch_change_starts_new_session(initialized: Path) -> None:
     repo = initialized
-    state_path = repo / ".context" / "state.json"
+    state_path = repo / ".contextbridge" / "state.json"
     main_session = json.loads(state_path.read_text())["active_session_id"]
     git(repo, "checkout", "-q", "-b", "feature/x")
     write(repo, "f.py", "def f():\n    pass\n")
@@ -217,15 +204,15 @@ def test_branch_change_starts_new_session(initialized: Path) -> None:
 def test_hook_never_fails_loudly(initialized: Path) -> None:
     write(initialized, "x.py", "x = 1\n")
     commit_all(initialized)
-    (initialized / ".context" / "config.json").write_text("{not json")
+    (initialized / ".contextbridge" / "config.json").write_text("{not json")
     code, out = cb("hook", "post-commit")
     assert (code, out) == (0, "")
-    assert "hook post-commit failed" in (initialized / ".context" / "cb.log").read_text()
+    assert "hook post-commit failed" in (initialized / ".contextbridge" / "cb.log").read_text()
 
 
 def test_hook_outside_initialized_repo_is_silent(git_repo: Path) -> None:
     assert cb("hook", "post-commit") == (0, "")
-    assert not (git_repo / ".context").exists()
+    assert not (git_repo / ".contextbridge").exists()
 
 
 def test_hook_skips_during_rebase(initialized: Path) -> None:
@@ -249,7 +236,8 @@ def test_hook_fast_on_1k_file_repo(initialized: Path) -> None:
     assert elapsed < 2.0, f"hook took {elapsed:.2f}s"
     last = _changes(initialized)[-1]
     assert last["file_path"] == "pkg/mod_7.py"
-    assert last["symbols"][0]["name"] == "f_7"
+    assert last["symbols"] == []
+    assert last["diff_snippet"] == "+1 / -1 lines"
 
 
 # ----- hook installation via `cb init` ---------------------------------------------------
@@ -324,7 +312,8 @@ def test_real_commit_triggers_background_hook(git_repo: Path) -> None:
         changes = _changes(git_repo)
     assert changes, "background hook did not record the commit"
     by_path = {c["file_path"]: c for c in changes}
-    assert [s["name"] for s in by_path["service.py"]["symbols"]] == ["Billing.charge"]
+    assert by_path["service.py"]["symbols"] == []
+    assert by_path["service.py"]["diff_snippet"] == "+1 / -1 lines"
 
 
 # ----- cb run ------------------------------------------------------------------------------
@@ -395,7 +384,7 @@ def test_cb_run_sanitizes_output(initialized: Path) -> None:
     token = "ghp_" + "A1b2C3d4E5" * 4
     result = runner.invoke(app, ["run", "--", sys.executable, "-c", f"print('token {token}')"])
     assert result.exit_code == 0
-    raw = (initialized / ".context" / "state.db").read_bytes()
+    raw = (initialized / ".contextbridge" / "state.db").read_bytes()
     assert token.encode() not in raw
     assert token not in _test_runs(initialized)[0]["failures"]
 

@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 
 from contextbridge.config import Config
-from contextbridge.core.ast_parser import symbols_for_change
-from contextbridge.core.git_observer import ChangeType, FileDiff, GitObserver
+from contextbridge.core.git_observer import GitObserver
+from contextbridge.core.watcher import excluded, ignored_by_gitignore
 from contextbridge.storage.db import Database
 from contextbridge.storage.workspace import Workspace
 
@@ -16,46 +16,23 @@ BACKFILL_LIMIT = 20
 
 log = logging.getLogger("contextbridge")
 
-def _sources(
-    observer: GitObserver, sha: str, parent: str, change: FileDiff
-) -> tuple[str | None, str | None]:
-    old_path = change.old_path or change.path
-    old = None if change.change_type == ChangeType.added else observer.file_at(parent, old_path)
-    new = None if change.change_type == ChangeType.deleted else observer.file_at(sha, change.path)
-    return old, new
-
 
 def record_commit(
     db: Database, observer: GitObserver, session_id: str, sha: str, config: Config
 ) -> int:
-    """Store one row per changed file of ``sha``. Returns the number of rows added."""
+    """Store metadata and numeric summaries, never source text or symbol signatures."""
     if db.has_commit(sha):
         return 0
     parent = observer.parent_of(sha)
-    result = observer.diff(
-        parent,
-        sha,
-        ignore_globs=config.capture.ignore_globs,
-        max_diff_chars=config.capture.max_diff_chars_per_file,
-    )
-    for skipped in result.skipped:
-        log.debug("hook: skipped %s (%s) in %s", skipped.path, skipped.reason, sha[:12])
-    added = 0
-    for change in result.files:
-        old, new = _sources(observer, sha, parent, change)
-        symbols = symbols_for_change(
-            change.path, old, new, change.patch, change_type=change.change_type.value
-        )
-        row = db.add_file_change(
-            session_id,
-            change.path,
-            change.change_type.value,
-            commit_sha=sha,
-            symbols=symbols,
-            diff_snippet=change.snippet,
-        )
-        added += row is not None
-    return added
+    files = [
+        change
+        for change in observer.numeric_changes(parent, sha)
+        if change.snippet != "binary file changed"
+        and not excluded(change.path, config.capture.ignore_globs)
+        and not ignored_by_gitignore(observer.root, change.path)
+        and not (change.old_path and excluded(change.old_path, config.capture.ignore_globs))
+    ]
+    return db.add_commit_changes(session_id, sha, files)
 
 
 def ingest_head(ws: Workspace) -> int:
@@ -84,5 +61,3 @@ def ingest_head(ws: Workspace) -> int:
             total += record_commit(db, observer, session.id, sha, config)
     log.info("hook: recorded %d file change(s) up to %s", total, repo.head_sha[:12])
     return total
-
-

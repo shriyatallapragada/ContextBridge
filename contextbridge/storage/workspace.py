@@ -1,11 +1,15 @@
-"""The `.context/` workspace: discovery, creation, `.gitignore`, `state.json`, logging."""
+"""The `.contextbridge/` workspace: discovery, creation, `.gitignore`, `state.json`, logging."""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
+import shutil
+import sqlite3
 import subprocess
+import tempfile
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -15,15 +19,14 @@ from contextbridge.core.sanitizer import sanitize
 from contextbridge.errors import NotInitializedError, StorageError
 from contextbridge.storage.db import Database, Session
 
-CONTEXT_DIRNAME = ".context"
+CONTEXT_DIRNAME = ".contextbridge"
+LEGACY_DIRNAME = ".context"
 DB_FILENAME = "state.db"
 STATE_FILENAME = "state.json"
 LOG_FILENAME = "cb.log"
 STATE_SCHEMA_VERSION = 1
 UNKNOWN_BRANCH = "(no-branch)"
 
-_GITIGNORE_ENTRY = ".context/"
-_GITIGNORE_EQUIVALENTS = {".context", ".context/", "/.context", "/.context/", ".context/**"}
 
 log = logging.getLogger("contextbridge")
 
@@ -38,12 +41,13 @@ def find_project_root(start: Path) -> Path:
 
 
 def find_context_dir(start: Path) -> Path:
-    """Walk up from ``start`` (like git) to find ``.context/``; raise if not initialized."""
+    """Find current or legacy storage in this directory or an ancestor."""
     start = start.resolve()
     for candidate in (start, *start.parents):
-        ctx = candidate / CONTEXT_DIRNAME
-        if (ctx / DB_FILENAME).is_file():
-            return ctx
+        for name in (CONTEXT_DIRNAME, LEGACY_DIRNAME):
+            ctx = candidate / name
+            if (ctx / DB_FILENAME).is_file():
+                return ctx
     raise NotInitializedError(str(start))
 
 
@@ -64,20 +68,68 @@ def detect_branch(repo_root: Path) -> str:
 
 
 def ensure_gitignored(repo_root: Path) -> bool:
-    """Add ``.context/`` to ``<repo_root>/.gitignore`` if missing. Returns True if changed."""
+    """Ignore both current and legacy storage directories, preserving existing entries."""
     path = repo_root / ".gitignore"
     existing = path.read_text(encoding="utf-8") if path.is_file() else ""
-    if any(line.strip() in _GITIGNORE_EQUIVALENTS for line in existing.splitlines()):
+    lines = {
+        line.strip().lstrip("/").removesuffix("/**").rstrip("/") for line in existing.splitlines()
+    }
+    missing = [name + "/" for name in (CONTEXT_DIRNAME, LEGACY_DIRNAME) if name not in lines]
+    if not missing:
         return False
     prefix = "" if not existing or existing.endswith("\n") else "\n"
-    with path.open("a", encoding="utf-8") as fh:
-        fh.write(f"{prefix}{_GITIGNORE_ENTRY}\n")
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(prefix + "\n".join(missing) + "\n")
     return True
+
+
+def copy_legacy_workspace(root: Path) -> None:
+    """Publish a complete SQLite-safe copy, retaining every legacy file.
+
+    An incomplete copy stays in a temporary directory. Concurrent publishers never
+    replace an initialized target. A conflicting target is left for the user to inspect.
+    """
+    legacy, target = root / LEGACY_DIRNAME, root / CONTEXT_DIRNAME
+    if not (legacy / DB_FILENAME).is_file() or (target / DB_FILENAME).is_file():
+        return
+    if target.exists():
+        raise StorageError(
+            "The new data folder already exists without a database. "
+            "Keep it as a backup under another name and run cb init again."
+        )
+    with tempfile.TemporaryDirectory(prefix=".contextbridge-copy-", dir=root) as temporary:
+        staging = Path(temporary) / "workspace"
+        # Refuse symlinks rather than following them outside the workspace.
+        for directory, dirs, files in os.walk(legacy, followlinks=False):
+            if any((Path(directory) / name).is_symlink() for name in dirs + files):
+                raise StorageError(
+                    "The old data folder contains a symbolic link. "
+                    "Replace the link with a local copy before running cb init."
+                )
+        shutil.copytree(legacy, staging)
+        copied_db = staging / DB_FILENAME
+        for suffix in ("", "-wal", "-shm"):
+            (staging / (DB_FILENAME + suffix)).unlink(missing_ok=True)
+        # backup() includes committed WAL data without modifying the original database.
+        with (
+            closing(
+                sqlite3.connect((legacy / DB_FILENAME).as_uri() + "?mode=ro", uri=True)
+            ) as source,
+            closing(sqlite3.connect(copied_db)) as destination,
+        ):
+            source.backup(destination)
+            if destination.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise StorageError("The copied database could not be verified.")
+        try:
+            staging.rename(target)
+        except OSError:
+            if not (target / DB_FILENAME).is_file():
+                raise
 
 
 @dataclass
 class State:
-    """Contents of ``.context/state.json``."""
+    """Contents of the workspace state.json."""
 
     project_name: str
     active_session_id: str | None = None
@@ -119,13 +171,17 @@ class State:
 
 @dataclass
 class Workspace:
-    """A located (or freshly created) ``.context/`` directory."""
+    """A located (or freshly created) workspace directory."""
 
     root: Path
 
     @property
     def context_dir(self) -> Path:
-        return self.root / CONTEXT_DIRNAME
+        current = self.root / CONTEXT_DIRNAME
+        legacy = self.root / LEGACY_DIRNAME
+        if not (current / DB_FILENAME).is_file() and (legacy / DB_FILENAME).is_file():
+            return legacy
+        return current
 
     @property
     def db_path(self) -> Path:
@@ -151,8 +207,9 @@ class Workspace:
 
     @classmethod
     def create(cls, root: Path) -> tuple[Workspace, bool]:
-        """Create ``.context/`` under ``root``. Returns (workspace, created_dir). Idempotent."""
+        """Create or copy the workspace. Return (workspace, created_dir)."""
         ws = cls(root=root.resolve())
+        copy_legacy_workspace(ws.root)
         created = not ws.context_dir.is_dir()
         ws.context_dir.mkdir(parents=True, exist_ok=True)
         if not ws.config_path.exists():
@@ -227,7 +284,7 @@ class Workspace:
     # ----- logging -----------------------------------------------------------
 
     def setup_logging(self, *, verbose: bool = False) -> None:
-        """Attach a sanitizing file handler for ``.context/cb.log`` (once per process)."""
+        """Attach a sanitizing file handler for the workspace log (once per process)."""
         target = str(self.log_path)
         for handler in list(log.handlers):
             if isinstance(handler, logging.FileHandler):

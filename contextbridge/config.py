@@ -56,7 +56,7 @@ class LLMConfig:
 
 
 def _default_ignore_globs() -> list[str]:
-    return ["*.lock", "node_modules/**", "dist/**", "*.min.js", ".context/**"]
+    return ["*.lock", "node_modules/**", "dist/**", "*.min.js", ".context/**", ".contextbridge/**"]
 
 
 @dataclass

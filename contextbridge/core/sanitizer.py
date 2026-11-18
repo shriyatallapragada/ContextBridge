@@ -159,7 +159,20 @@ def sanitize(text: str) -> str:
     return sanitize_with_report(text).text
 
 
-SENSITIVE_FILE_GLOBS: tuple[str, ...] = (".env", ".env.*", "*.pem", "*.key", "id_rsa*")
+SENSITIVE_FILE_GLOBS: tuple[str, ...] = (
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "*.keystore",
+    "id_rsa*",
+    "id_ed25519*",
+    "id_ecdsa*",
+    "credentials.json",
+    "service-account*.json",
+)
 
 
 def is_sensitive_file(path: str | PurePath) -> bool:

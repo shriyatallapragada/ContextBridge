@@ -1,4 +1,4 @@
-"""`cb init`: create `.context/`, the database, state and config; start a session."""
+"""`cb init`: create `.contextbridge/`, the database, state and config; start a session."""
 
 from __future__ import annotations
 
@@ -77,7 +77,7 @@ def init_command(
             f"[bold green]✓[/] {verb} ContextBridge in [cyan]{result.workspace.context_dir}[/]"
         )
         if result.gitignore_changed:
-            console.print("  • Added [cyan].context/[/] to .gitignore")
+            console.print("  • Added ContextBridge data folders to .gitignore")
         if result.migrations:
             console.print(f"  • Database schema at v{result.schema_version}")
         session_verb = "Started" if result.created_session else "Resumed"

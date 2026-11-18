@@ -41,7 +41,7 @@ def svc(git_repo: Path) -> ProjectService:
 
 
 def _rows(root: Path, sql: str) -> list[tuple[object, ...]]:
-    conn = sqlite3.connect(root / ".context" / "state.db")
+    conn = sqlite3.connect(root / ".contextbridge" / "state.db")
     try:
         return conn.execute(sql).fetchall()
     finally:
