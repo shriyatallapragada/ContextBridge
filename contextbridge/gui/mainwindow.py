@@ -26,6 +26,8 @@ from contextbridge.errors import ContextBridgeError
 from contextbridge.gui import assets, theme
 from contextbridge.gui.pages.base import ProjectPage
 from contextbridge.gui.pages.changes import ChangesPage
+from contextbridge.gui.pages.chat import ChatPage
+from contextbridge.gui.pages.guide import GuidePage
 from contextbridge.gui.pages.handoff import HandoffPage
 from contextbridge.gui.pages.home import HomePage
 from contextbridge.gui.pages.notes import NotesPage
@@ -43,6 +45,8 @@ NAV: tuple[tuple[str, str], ...] = (
     ("changes", "Changes"),
     ("handoff", "Hand off"),
     ("settings", "Settings"),
+    ("guide", "Project guide"),
+    ("chat", "Chat bridge"),
 )
 MAX_RECENTS = 6
 WELCOME_INDEX, SHELL_INDEX = 0, 1
@@ -102,6 +106,8 @@ class MainWindow(QMainWindow):
             "changes": ChangesPage(self),
             "handoff": HandoffPage(self),
             "settings": SettingsPage(self),
+            "guide": GuidePage(self),
+            "chat": ChatPage(self),
         }
         for key, _text in NAV:
             self.pages.addWidget(self.page_map[key])
@@ -176,8 +182,14 @@ class MainWindow(QMainWindow):
     def go(self, key: str) -> None:
         if key not in self.page_map:
             return
+        if key == "chat":
+            self.root.setCurrentIndex(SHELL_INDEX)
         self.nav_buttons[key].setChecked(True)
         self.pages.setCurrentWidget(self.page_map[key])
+        if key == "guide" and self.service is not None:
+            guide = self.page_map[key]
+            if isinstance(guide, GuidePage) and guide._document_path is None:
+                guide._load()
 
     def choose_project(self) -> None:
         start = str(self.service.root.parent) if self.service else str(Path.home())

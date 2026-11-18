@@ -22,6 +22,8 @@ from typing import Any
 
 from contextbridge.adapters.base_adapter import MAX_ACTIVE_FILES, BaseAdapter
 from contextbridge.adapters.registry import all_adapters, get_adapter, resolve_name
+from contextbridge.chat_bridge import ChatPacket, build_chat_packet
+from contextbridge.chat_files import ImportedChat, read_chat_file
 from contextbridge.config import save_config
 from contextbridge.core.git_observer import HOOK_START, GitObserver, HookResult
 from contextbridge.core.sanitizer import SanitizeResult, sanitize, sanitize_with_report
@@ -39,6 +41,7 @@ from contextbridge.errors import (
     UnknownAgentError,
     UserError,
 )
+from contextbridge.project_map import ProjectMap, scan_project
 from contextbridge.storage.db import (
     Decision,
     HandoffRecord,
@@ -136,6 +139,14 @@ class Snapshot:
 
     context: SessionContext
     last_handoff: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class GuideContent:
+    files: list[tuple[str, str]]
+    progress: str
+    next_steps: str
+    suggestions: str
 
 
 @dataclass(frozen=True)
@@ -322,6 +333,100 @@ class ProjectService:
             raise NotAGitRepoError(str(self.root))
         return observer.uninstall_hook()
 
+    def ingest_head(self) -> int:
+        from contextbridge.core.change_logger import ingest_head
+
+        return ingest_head(self._require_init())
+
+    def guide_content(self, snapshot: Snapshot) -> GuideContent:
+        ctx = snapshot.context
+        files: list[tuple[str, str]] = []
+        for item in ctx.files:
+            path = item.path.lower()
+            purpose = "Project file; consult its contents and documentation for its exact role."
+            if "test" in path:
+                purpose = (
+                    "Checks expected behavior; a test file's presence does not prove it passes."
+                )
+            elif "readme" in path or path.endswith(".md"):
+                purpose = "Documentation explaining usage, decisions, or intended behavior."
+            elif "config" in path or path.endswith((".toml", ".yaml", ".json")):
+                purpose = "Configuration or structured data used by the project or its tools."
+            elif "gui/" in path or "components/" in path:
+                purpose = "Interface code: screens or components a user interacts with."
+            elif "adapter" in path:
+                purpose = "Integration code connecting the app with another tool or format."
+            elif path.endswith((".py", ".js", ".ts", ".tsx")):
+                purpose = "Program logic; its exact responsibilities require reading the code."
+            files.append((item.path, purpose))
+        progress = [
+            f"# {ctx.project}\n\nBranch: `{ctx.branch}`",
+            "",
+            "## Recorded commits\n\n_Not independently verified._\n",
+        ]
+        progress += [f"- {c.subject}" for c in ctx.commits] or [
+            "No commits captured in this session."
+        ]
+        progress += [
+            "",
+            "## Changed files\n\n_Changes do not necessarily mean completed features._\n",
+        ]
+        progress += [f"- {f.path}: {f.change_type}" for f in ctx.files] or [
+            "No file changes captured."
+        ]
+        plans = [f"- {d.content}" for d in ctx.decisions_tagged("todo")]
+        blockers = [f"- {d.content}" for d in ctx.decisions_tagged("blocker")]
+        progress_text = sanitize("\n".join(progress))
+        next_steps = (
+            sanitize(
+                "## Recorded to-dos\n\n"
+                + "\n".join(plans or ["None recorded. Add a To-do in Notes."])
+                + "\n\n## Recorded blockers\n\n"
+                + "\n".join(blockers or ["None recorded."])
+            )
+        )
+        suggestions = ["These are rule-based suggestions, not an assessment of code quality."]
+        if ctx.tests_failing:
+            suggestions.append("- Resolve the recorded failing test run before adding features.")
+        elif ctx.test_run is None:
+            suggestions.append(
+                "- Record a test run to give the next person evidence of what works."
+            )
+        if not plans:
+            suggestions.append(
+                "- Add one concrete next step in Notes so a new assistant knows where to start."
+            )
+        if any(f.uncommitted for f in ctx.files):
+            suggestions.append(
+                "- Review unfinished changes before describing them as completed work."
+            )
+        suggestions.append("- Ask a new user to follow the README and record where they get stuck.")
+        suggestion_text = (
+            "## Suggestions\n\n" + suggestions[0] + "\n\n" + "\n".join(suggestions[1:])
+        )
+        return GuideContent(files, progress_text, next_steps, suggestion_text)
+
+    def project_map(self) -> ProjectMap:
+        return scan_project(self.root)
+
+    def document_path(self, path: Path) -> Path:
+        """Validate a document selection before scheduling a background read."""
+        path = path.resolve()
+        if not path.is_relative_to(self.root) or path.suffix.lower() not in (
+            ".md", ".txt", ".rst", ""
+        ):
+            raise UserError("Choose a Markdown or text document inside this project.")
+        return path
+
+    def read_document(self, path: Path) -> str:
+        path = self.document_path(path)
+        with path.open(encoding="utf-8", errors="replace") as stream:
+            text = stream.read(128001)
+        suffix = (
+            "\n\n> Document excerpt limited to 128,000 characters." if len(text) > 128000 else ""
+        )
+        return sanitize(text[:128000]) + suffix
+
     # ----- reading -----------------------------------------------------------------------
 
     def snapshot(self, *, include_worktree: bool = True) -> Snapshot:
@@ -346,6 +451,18 @@ class ProjectService:
             raise UserError("Search query is empty.")
         with ws.open_db() as db:
             return keyword_search(db, query, limit=limit)
+
+    def semantic_search(self, query: str, limit: int = 10) -> list[SearchHit]:
+        from contextbridge.storage.vector_store import VectorStore
+
+        ws = self._require_init()
+        query = sanitize(query).strip()
+        if not query:
+            raise UserError("Search query is empty.")
+        store = VectorStore(ws.context_dir / VECTOR_DIRNAME)
+        with ws.open_db() as db:
+            store.sync(db)
+        return store.search(query, limit=limit)
 
     # ----- writing notes and test runs ---------------------------------------------------
 
@@ -557,6 +674,18 @@ class ProjectService:
         ws.load_config()  # Validate what we just wrote.
 
 
+class ChatService:
+    """Project-independent chat operations shared by front ends."""
+
+    @staticmethod
+    def prepare(transcript: str, goal: str, pinned: str, budget: int = 6000) -> ChatPacket:
+        return build_chat_packet(transcript, goal, pinned, budget)
+
+    @staticmethod
+    def import_file(path: Path) -> ImportedChat:
+        return read_chat_file(path)
+
+
 def check_ollama(host: str, model: str) -> OllamaCheck:
     """Is Ollama running, and does it have ``model``? Never raises."""
     try:
@@ -579,11 +708,15 @@ def check_ollama(host: str, model: str) -> OllamaCheck:
 
 __all__ = [
     "AISettings",
+    "ChatService",
     "CommittedHandoff",
+    "GuideContent",
+    "ImportedChat",
     "InitResult",
     "NoteResult",
     "OllamaCheck",
     "PreparedHandoff",
+    "ProjectMap",
     "ProjectService",
     "Snapshot",
     "TestOutcome",

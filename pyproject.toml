@@ -18,7 +18,10 @@ dependencies = [
 [project.optional-dependencies]
 vector = ["chromadb>=0.5"]
 cloud = ["openai>=1.30", "groq>=0.9"]
-gui = ["PySide6-Essentials>=6.12,<6.13"]
+gui = [
+    "pypdf>=6,<7",
+    "PySide6-Essentials>=6.12,<6.13",
+]
 build = ["pyinstaller>=6.22,<7"]
 dev = [
     "pytest>=8.0",

@@ -8,7 +8,7 @@ import typer
 from rich.markup import escape
 
 from contextbridge.cli.common import app_context, console, error_boundary, log
-from contextbridge.core.git_observer import GitObserver, HookAction, HookResult
+from contextbridge.core.git_observer import HookAction, HookResult
 from contextbridge.errors import NotAGitRepoError
 from contextbridge.service import ProjectService
 from contextbridge.storage.workspace import find_project_root
@@ -40,11 +40,10 @@ def _report_install(result: HookResult) -> None:
 
 def _uninstall_hooks(root: Path) -> None:
     try:
-        observer = GitObserver.open(root)
+        result = ProjectService(root).uninstall_hook()
     except NotAGitRepoError:
         console.print("[dim]Not a git repository; no hooks to remove.[/]")
         return
-    result = observer.uninstall_hook()
     path = escape(str(result.path))
     if result.action == HookAction.not_installed:
         console.print(f"[dim]No ContextBridge hook found in {path}.[/]")

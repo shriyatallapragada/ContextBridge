@@ -64,8 +64,10 @@ def test_agents_match_adapters() -> None:
     files = {a.key: a.file for a in wording.AGENTS}
     assert files == {
         "claude": "CLAUDE.md",
+        "codex": "AGENTS.md",
         "cursor": ".cursor/rules/handoff.mdc",
         "generic": "HANDOFF.md",
+        "kiro": "AGENTS.md",
     }
 
 
@@ -117,3 +119,9 @@ def test_test_summary() -> None:
 def test_plural() -> None:
     assert wording.plural(1, "note") == "1 note" and wording.plural(2, "note") == "2 notes"
     assert wording.plural(0, "match", "matches") == "0 matches"
+
+
+def test_guide_section_contrast() -> None:
+    assert theme.contrast_ratio("#FFFFFF", "#632626") >= 7
+    assert theme.contrast_ratio("#352727", "#FFFFFF") >= 7
+    assert theme.contrast_ratio("#352727", "#EFE4D9") >= 7

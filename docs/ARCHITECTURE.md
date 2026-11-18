@@ -353,7 +353,9 @@ All adapters share one idea: ContextBridge owns **only the text between two mark
 | Adapter (`--to`) | Writes | Details |
 |---|---|---|
 | `claude`, alias `claude-code` | `CLAUDE.md` | Wraps the payload in `<context_handoff>...</context_handoff>` inside the markers and appends it after your content. Cleanup deletes the file only if it's left empty, meaning ContextBridge created it |
+| `codex` | `AGENTS.md` | Appends/replaces only the marked handoff block; preserves other instructions |
 | `cursor` | `.cursor/rules/handoff.mdc` | YAML frontmatter (`description`, `alwaysApply: true`) **outside** the markers, since Cursor requires it first in the file. Cleanup deletes the file and then any now-empty `.cursor/rules` and `.cursor` directories |
+| `kiro` | `AGENTS.md` | Shares Codex's instruction file and marked block; preserves other instructions |
 | `generic`, aliases `aider`, `opencode` | `HANDOFF.md` | The marker block is the whole file |
 
 ### Guarantees (all tested)

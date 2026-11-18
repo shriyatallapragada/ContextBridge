@@ -9,7 +9,8 @@ from rich.table import Table
 from contextbridge.cli.common import console, err_console, error_boundary, log, open_workspace
 from contextbridge.core.sanitizer import sanitize
 from contextbridge.errors import UserError
-from contextbridge.storage.db import SearchHit, keyword_search
+from contextbridge.service import ProjectService
+from contextbridge.storage.db import SearchHit
 from contextbridge.storage.workspace import Workspace
 
 VECTOR_DIRNAME = "vector_db"
@@ -17,12 +18,7 @@ SNIPPET_CHARS = 160
 
 
 def _semantic(ws: Workspace, query: str, limit: int) -> list[SearchHit]:
-    from contextbridge.storage.vector_store import VectorStore
-
-    store = VectorStore(ws.context_dir / VECTOR_DIRNAME)
-    with ws.open_db() as db:
-        store.sync(db)
-    return store.search(query, limit=limit)
+    return ProjectService(ws.root).semantic_search(query, limit)
 
 
 def _snippet(text: str) -> str:
@@ -60,8 +56,7 @@ def search_command(
                 "semantic search).[/]"
             )
         if hits is None:
-            with ws.open_db() as db:
-                hits = keyword_search(db, query, limit=limit)
+            hits = ProjectService(ws.root).search(query, limit=limit)
 
         log.info("search: mode=%s results=%d", mode, len(hits))
         if not hits:

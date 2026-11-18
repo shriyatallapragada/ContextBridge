@@ -50,7 +50,7 @@ def handoff_command(
         None, "--from", help="Agent you are leaving (any name; used as a label)."
     ),
     to_agent: str | None = typer.Option(
-        None, "--to", help="Agent to hand off to: claude, cursor, generic (or an alias)."
+        None, "--to", help="Agent to hand off to: claude, codex, cursor, kiro, generic (or an alias)."
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Build and show the payload without writing anything."

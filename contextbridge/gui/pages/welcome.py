@@ -44,6 +44,10 @@ class WelcomePage(QWidget):
         outer.addSpacing(8)
         outer.addWidget(self.choose, 0, Qt.AlignmentFlag.AlignHCenter)
 
+        chat = button("Transfer a chatbot conversation", "Link")
+        chat.clicked.connect(lambda: host.go("chat"))
+        outer.addWidget(chat, 0, Qt.AlignmentFlag.AlignHCenter)
+
         self.recent_box = QVBoxLayout()
         self.recent_box.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         outer.addLayout(self.recent_box)

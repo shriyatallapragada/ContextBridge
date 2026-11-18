@@ -7,8 +7,8 @@ from enum import StrEnum
 import typer
 
 from contextbridge.cli.common import console, error_boundary, log, open_workspace
-from contextbridge.core.sanitizer import sanitize_with_report
 from contextbridge.errors import UserError
+from contextbridge.service import ProjectService
 
 
 class Tag(StrEnum):
@@ -29,10 +29,8 @@ def log_command(
         if not message.strip():
             raise UserError("Log message is empty.")
         ws = open_workspace(ctx)
-        result = sanitize_with_report(message)
-        with ws.open_db() as db:
-            session, _ = ws.active_session(db)
-            decision = db.add_decision(session.id, result.text, tag.value)
+        note = ProjectService(ws.root).add_note(message, tag.value)
+        decision, result = note.decision, note.redactions
 
         log.info("log: stored %s tag=%s redactions=%d", decision.id, tag.value, result.total)
         console.print(f"[bold green]✓[/] Logged [yellow]{tag.value}[/] [dim]({decision.id})[/]")

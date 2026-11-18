@@ -19,10 +19,16 @@ If you'd rather click than type, there's a friendly desktop app with the same fe
   summary in plain words, and write it
 - **Settings**: AI on or off, automatic commit notes, and a clearly marked "start fresh" area
 
-Open it with `cb gui` or `contextbridge-gui` (install with `uv tool install 'contextbridge[gui]'`),
-or build a double-click app with `uv run python scripts/build_app.py`
-(see [docs/PACKAGING.md](docs/PACKAGING.md)). It works fully offline and never needs an AI.
+Open it by double-clicking [`launch.command`](launch.command) on macOS, or run `./launch.command`
+from Terminal. See [LAUNCH.md](LAUNCH.md) for first-launch instructions. The app works fully
+offline and never needs Ollama; if Ollama is unavailable, it uses a deterministic summary.
 Artwork can be swapped without touching code: see [docs/GUI_ASSETS.md](docs/GUI_ASSETS.md).
+
+## Offline guide and chatbot transfer
+
+**Project guide** explains documented purpose, recorded progress, planned work, and rule-based suggestions. Its file table explains likely file roles and labels them as inferences.
+
+**Chat bridge** works even without a project. Paste chat text or import a PDF/text file, pin key facts, preview a bounded excerpt, then copy it into another chatbot or save it as a PDF. The optional `browser-extension` exports selected text on your explicit click. These features require no model or subscription. See [docs/OFFLINE_BRIDGES.md](docs/OFFLINE_BRIDGES.md) for the workflow and limitations.
 
 ## Install
 
@@ -75,11 +81,16 @@ it never appends a second one.
 | `--to` | File written | Notes |
 |---|---|---|
 | `claude` (alias `claude-code`) | `CLAUDE.md` | Adds a `<context_handoff>` block; your own content is untouched. Claude Code reads `CLAUDE.md` automatically |
+| `codex` | `AGENTS.md` | Adds a marked handoff block and preserves your existing instructions. Codex reads `AGENTS.md` automatically |
 | `cursor` | `.cursor/rules/handoff.mdc` | An always-applied Cursor rule |
+| `kiro` | `AGENTS.md` | Shares the marked handoff with Codex; Kiro also reads `AGENTS.md` automatically |
 | `generic` (aliases `aider`, `opencode`) | `HANDOFF.md` | For Aider, OpenCode, or anything else: point the agent at this file |
 
 `HANDOFF.md` and `handoff.mdc` are overwritten only if ContextBridge created them. If a
-file with that name already exists, use `--force` to replace it.
+file with that name already exists, use `--force` to replace it. Codex and Kiro handoffs
+share one marked block in `AGENTS.md`; the rest of your project instructions are preserved.
+Because both agents load that file automatically, keep the handoff concise or replace it
+when you switch sessions to avoid carrying stale context into every request.
 
 `--from` is just a label (any name). Remove everything ContextBridge injected, leaving the
 rest of your files as they were:
@@ -170,3 +181,32 @@ uv run pytest -q
 
 Tests use temporary git repositories. LLM calls are mocked; nothing needs a network or a
 running Ollama.
+
+## Shared Python engine
+
+The desktop app and CLI share `contextbridge.service.ProjectService` for project
+operations. Notes, snapshots, keyword and semantic searches, commit capture,
+handoffs, project maps, and guide explanations run through the same engine.
+`ChatService` imports conversations and prepares offline chat handoffs without
+an initialized project. The engine imports without Qt, Typer, or Rich.
+
+```python
+from pathlib import Path
+from contextbridge.service import ProjectService
+
+project = ProjectService.for_path(Path.cwd())
+project.init(install_hook=False)
+project.add_note("Use SQLite for local storage", "architecture")
+snapshot = project.snapshot()
+prepared = project.prepare_handoff("claude", "generic", use_llm=False)
+print(prepared.handoff.payload)
+```
+
+Run the CLI with `uv run cb --help`, or launch the desktop app with
+`uv run cb gui`. Run engine boundary checks with
+`uv run pytest -q tests/test_engine_boundary.py tests/test_service.py`.
+
+The next stages will add the watcher, optional provider setup, and local API.
+The folder migration will copy existing `.context/` data and retain legacy reads.
+The API will bind to `127.0.0.1` and authenticate every request with a random
+per-session token. The first desktop packaging target is macOS, with signing deferred.

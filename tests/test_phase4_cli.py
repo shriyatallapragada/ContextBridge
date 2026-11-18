@@ -150,7 +150,7 @@ def test_dry_run_writes_nothing(repo: Path) -> None:
 def test_unknown_agent_fails_before_any_work(repo: Path) -> None:
     code, out = cb("handoff", "--from", "claude", "--to", "gemini")
     assert code == 1
-    assert "Unknown agent 'gemini'" in out and "claude, cursor, generic" in out
+    assert "Unknown agent 'gemini'" in out and "claude, codex, cursor, generic, kiro" in out
     assert _rows(repo, "SELECT * FROM handoffs") == []
     assert cb("handoff", "--dry-run", "--to", "gemini")[0] == 1
 
@@ -190,7 +190,7 @@ def test_secrets_never_reach_the_files_or_database(repo: Path) -> None:
     cb("log", "key is AKIAIOSFODNN7EXAMPLE", "--tag", "blocker")
     write(repo, "config.py", 'TOKEN = "ghp_' + "Q1w2E3r4T5" * 4 + '"\n')
     write(repo, ".env", "API_SECRET=hunter2hunter2\n")
-    for agent in ("claude", "cursor", "generic"):
+    for agent in ("claude", "codex", "cursor", "generic", "kiro"):
         assert cb("handoff", "--from", "x", "--to", agent)[0] == 0
     blob = (
         b"".join(

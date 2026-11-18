@@ -39,12 +39,14 @@ class AgentChoice:
 
 AGENTS: tuple[AgentChoice, ...] = (
     AgentChoice("claude", "Claude Code", "Claude reads this file on its own.", "CLAUDE.md"),
+    AgentChoice("codex", "Codex", "Codex reads this project instructions file.", "AGENTS.md"),
     AgentChoice("cursor", "Cursor", "Adds a rule Cursor always follows.", ".cursor/rules/handoff.mdc"),
+    AgentChoice("kiro", "Kiro", "Kiro reads this project instructions file.", "AGENTS.md"),
     AgentChoice("generic", "Another tool", "For Aider, OpenCode and others.", "HANDOFF.md"),
 )  # fmt: skip
 AGENT_LABELS = {a.key: a.label for a in AGENTS}
 SOURCE_CHOICES: tuple[tuple[str, str], ...] = (
-    *((a.key, a.label) for a in AGENTS[:2]),
+    *((a.key, a.label) for a in AGENTS if a.key != "generic"),
     ("another tool", "Another tool"),
 )
 

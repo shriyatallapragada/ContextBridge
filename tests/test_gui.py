@@ -803,3 +803,91 @@ def test_window_closes_cleanly_with_work_running(
     shell.window.close()  # closing while the setup task may still be running must not crash
     shell.window.runner.wait(5000)
     pump(qapp, 0.05)
+
+
+def test_chat_bridge_without_project(shell: Shell) -> None:
+    shell.window.go("chat")
+    page = shell.window.page_map["chat"]
+    assert shell.window.service is None
+    page.transcript.setPlainText("User: Plan a trip.\nAssistant: What budget?")
+    page.goal.setText("Plan a weekend trip")
+    page.pinned.setPlainText("Budget is 200")
+    find_button(page, "Prepare handoff").click()
+    assert "Budget is 200" in page.preview.toPlainText()
+    assert "weekend trip" in page.preview.toPlainText()
+    find_button(page, "Clear chat and preview").click()
+    assert not page.transcript.toPlainText() and not page.preview.toPlainText()
+
+
+def test_project_guide_reads_documentation(ready: Shell, project: Path) -> None:
+    (project / "README.md").write_text("# Example\nA project for tracking books.")
+    page = ready.page("guide")
+    find_button(page, "Refresh guide").click()
+    ready.settle()
+    assert "tracking books" in page.views["What it does"].toPlainText()
+    assert "rule-based suggestions" in page.views["Suggestions"].toPlainText()
+
+
+def test_guide_renders_markdown_and_workflow(ready: Shell, project: Path) -> None:
+    (project / 'README.md').write_text('# Readable heading\n\n**Bold text**\n\n| Name | Role |\n| --- | --- |\n| UI | Display |')
+    page = ready.page('guide')
+    find_button(page, 'Refresh guide').click()
+    ready.settle()
+    view = page.views['What it does']
+    assert '# Readable heading' not in view.toPlainText()
+    assert '<table' in view.toHtml()
+    page.diagram.mode.setCurrentIndex(1)
+    assert len(page.diagram.items) == 5
+    page.diagram.items['3. Prepare'].setSelected(True)
+    assert any(arrow.isVisible() for _, _, arrow in page.diagram.arrows)
+
+
+def test_guide_rejects_documents_outside_project(ready: Shell, tmp_path: Path) -> None:
+    outside = tmp_path / 'private.md'
+    outside.write_text('Do not load this')
+    page = ready.page('guide')
+    page._read_document(outside)
+    assert 'inside this project' in page.status.text()
+    assert 'Do not load this' not in page.views['What it does'].toPlainText()
+
+
+def test_guide_flowcharts_visible_and_refresh_preserves_selection(ready: Shell) -> None:
+    ready.window.resize(880, 600)
+    page = ready.page("guide")
+    ready.settle()
+    assert len(page.section_buttons) == 6
+    for control in page.section_buttons.values():
+        assert control.isVisibleTo(page)
+        assert control.width() > 100
+    page.section_buttons["Flowcharts"].click()
+    assert page.tabs.currentWidget() is page.diagram
+    assert page.diagram.mode.currentIndex() == 1
+    find_button(page, "Refresh guide").click()
+    ready.settle()
+    assert page.tabs.currentWidget() is page.diagram
+    assert page.section_buttons["Flowcharts"].isChecked()
+    assert not page.tabs.tabBar().isVisible()
+
+
+def test_chat_import_pdf_export_and_cancel_inflight(shell: Shell, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from contextbridge.gui.chat_pdf import save_chat_pdf
+    from contextbridge.chat_files import read_chat_file
+
+    source = tmp_path / 'source.pdf'
+    save_chat_pdf(source, '# Conversation\n\nUser: Keep the deadline on Friday.')
+    page = shell.page('chat')
+    monkeypatch.setattr('contextbridge.gui.pages.chat.QFileDialog.getOpenFileName', lambda *a, **kw: (str(source), 'PDF (*.pdf)'))
+    page._import()
+    shell.settle()
+    assert 'deadline on Friday' in page.transcript.toPlainText()
+    page.goal.setText('Continue planning')
+    page._prepare()
+    output = tmp_path / 'handoff.pdf'
+    monkeypatch.setattr('contextbridge.gui.pages.chat.QFileDialog.getSaveFileName', lambda *a, **kw: (str(output), 'PDF (*.pdf)'))
+    find_button(page, 'Save PDF…').click()
+    assert 'Continue planning' in read_chat_file(output).text
+    page._import()
+    page._clear()
+    shell.settle()
+    assert not page.transcript.toPlainText()
+    assert page.import_button.isEnabled()
