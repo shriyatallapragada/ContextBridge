@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
@@ -16,6 +17,10 @@ from contextbridge.providers.base import (
     ProviderUnavailable,
     validate_response,
 )
+
+
+class ModelNotFound(ProviderUnavailable):
+    """The selected model or generation route was rejected."""
 
 
 def validate_endpoint(endpoint: str, *, local: bool = False) -> str:
@@ -78,13 +83,24 @@ class HTTPProvider:
                         "The provider rejected the API key. Check it in Settings."
                     )
                 if response.status_code == 404:
-                    message = (
-                        "The Ollama model is unavailable. "
-                        "Install the configured model with ollama pull."
-                        if not self.is_cloud
-                        else "The endpoint or model was not found. Check Settings."
-                    )
-                    raise ProviderUnavailable(message)
+                    raise ModelNotFound("The endpoint or model was not found.")
+                if response.status_code in (400, 410):
+                    # Inspect only known error codes, never echo a server's error body.
+                    content = bytearray()
+                    for chunk in response.iter_bytes():
+                        content.extend(chunk)
+                        if len(content) > 2_000_000:
+                            raise ProviderError("The provider response was too large.")
+                    try:
+                        error = json.loads(content).get("error", {})
+                    except (ValueError, AttributeError):
+                        error = {}
+                    if isinstance(error, dict) and error.get("code") in (
+                        "model_not_found",
+                        "model_not_available",
+                        "model_decommissioned",
+                    ):
+                        raise ModelNotFound("The endpoint or model was not found.")
                 if not 200 <= response.status_code < 300:
                     raise ProviderUnavailable(
                         "The model service is unavailable. Using the offline result."
@@ -95,8 +111,6 @@ class HTTPProvider:
                     if size > 2_000_000:
                         raise ProviderError("The provider response was too large.")
                     chunks.append(chunk)
-                import json
-
                 result = json.loads(b"".join(chunks))
                 if not isinstance(result, dict):
                     raise ValueError("object required")
@@ -115,7 +129,53 @@ class HTTPProvider:
         except (ValueError, UnicodeError):
             raise ProviderError("The provider returned an unreadable response.") from None
 
+    def _safe_detail(self, text: str) -> str:
+        return sanitize(text.replace(self.api_key, "[REDACTED]") if self.api_key else text)
+
+    def _missing_model_message(self) -> str:
+        route = "/chat/completions" if self.is_cloud else "/api/chat"
+        listing = "/models" if self.is_cloud else "/api/tags"
+        prefix = (
+            f"Model {self.model!r} or endpoint was not found. "
+            f"Tried {self.endpoint.rstrip('/') + route}. "
+        )
+        try:
+            response = self.request(listing)
+            entries = response.get("data" if self.is_cloud else "models")
+            if not isinstance(entries, list):
+                raise ProviderError("The model list was unreadable.")
+            names = sorted(
+                {
+                    str(item.get("id") if self.is_cloud else item.get("name", item.get("model")))[
+                        :200
+                    ]
+                    for item in entries
+                    if isinstance(item, dict)
+                    and isinstance(
+                        item.get("id") if self.is_cloud else item.get("name", item.get("model")),
+                        str,
+                    )
+                }
+            )
+            offered = ", ".join(names[:50]) or "none returned"
+            if len(names) > 50:
+                offered += f" (and {len(names) - 50} more)"
+            detail = f"Offered models: {offered}."
+        except (ProviderError, ConfigError):
+            detail = (
+                f"Offered models could not be retrieved from {self.endpoint.rstrip('/') + listing}."
+            )
+        if not self.is_cloud:
+            detail += f" Install the model with ollama pull {self.model}."
+        return self._safe_detail(prefix + detail)
+
     def generate(self, prompt: str, schema: dict[str, Any] | None = None) -> str:
+        try:
+            return self._generate(prompt, schema)
+        except ModelNotFound:
+            raise ModelNotFound(self._missing_model_message()) from None
+
+    def _generate(self, prompt: str, schema: dict[str, Any] | None) -> str:
         if self.is_cloud and not self.api_key:
             raise ProviderUnavailable(
                 "No API key is configured. Add one in Settings or use offline mode."

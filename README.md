@@ -24,6 +24,10 @@ from Terminal. See [LAUNCH.md](LAUNCH.md) for first-launch instructions. The app
 offline and never needs Ollama; if Ollama is unavailable, it uses a deterministic summary.
 On first launch, setup explains offline operation and lets you continue without a model,
 choose local Ollama, or enter an API endpoint and key. Connection checks run only when clicked.
+Each check sends a tiny test prompt to the exact model and endpoint entered in the form,
+with at most eight output tokens and no project context. A successful check does not save
+the form; click **Save model settings** to apply it. Missing-model errors show the selected
+model, attempted URL and offered models (or explain why the model list is unavailable).
 Artwork can be swapped without touching code: see [docs/GUI_ASSETS.md](docs/GUI_ASSETS.md).
 
 ## Offline guide and chatbot transfer

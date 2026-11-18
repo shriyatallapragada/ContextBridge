@@ -46,3 +46,62 @@ def test_first_run_offers_local_and_api_options(tmp_path):
     assert not form.key.isVisibleTo(form)
     assert form.endpoint.text().startswith("http://")
     window.close()
+
+
+def test_typed_model_survives_refresh_check_and_save_then_reaches_cli(git_repo, monkeypatch):
+    import json
+
+    from typer.testing import CliRunner
+
+    from contextbridge.gui.provider_form import ProviderForm
+    from contextbridge.gui.workers import TaskRunner
+    from contextbridge.main import app as cli_app
+    from contextbridge.providers import credentials
+    from contextbridge.providers.settings import ProviderSettingsService
+    from contextbridge.service import ProjectService
+    from tests.gui_helpers import wait_for
+
+    app = QApplication.instance() or QApplication([])
+    configure_app(app)
+    project = ProjectService(git_repo)
+    project.init(install_hook=False)
+    monkeypatch.setattr(credentials, "get_key", lambda endpoint: "saved-test-key")
+    service = ProviderSettingsService(project.ws.context_dir)
+    endpoint = "https://api.groq.com/openai/v1"
+    service.save("openai-compatible", "llama-3.1-8b-instant", endpoint)
+    calls = []
+
+    def request(self, path, body=None):
+        calls.append((self.model, self.endpoint, path, body))
+        prompt = body["messages"][0]["content"]
+        content = (
+            "OK"
+            if prompt == "Reply with OK."
+            else json.dumps({"lines": json.loads(prompt)["lines"]})
+        )
+        return {"choices": [{"message": {"content": content}}]}
+
+    monkeypatch.setattr(HTTPProvider, "request", request)
+    saved = []
+    form = ProviderForm(TaskRunner(), service, lambda: saved.append(True))
+    form.show()
+    model = "llama-3.3-70b-versatile"
+    form.model.setText(model)
+    # MainWindow refreshes every page when new project snapshots arrive.
+    form.service = ProviderSettingsService(project.ws.context_dir)
+    form.reload()
+    assert form.model.text() == model
+    form.check_button.click()
+    wait_for(app, lambda: form.check_button.isEnabled())
+    assert "responded successfully" in form.message.text()
+    assert model in form.message.text()
+    assert service.load().llm.model == "llama-3.1-8b-instant"  # Check does not save.
+    form.save_button.click()
+    wait_for(app, lambda: bool(saved))
+    form.reload()
+    assert form.model.text() == service.load().llm.model == model
+    result = CliRunner().invoke(cli_app, ["handoff", "--to", "codex", "--dry-run"])
+    assert result.exit_code == 0 and "openai-compatible" in result.output
+    assert len(calls) == 2 and all(call[0] == model and call[1] == endpoint for call in calls)
+    assert calls[0][3]["max_tokens"] == 8
+    form.close()

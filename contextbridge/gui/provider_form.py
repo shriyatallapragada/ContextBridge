@@ -36,7 +36,7 @@ class ProviderForm(QWidget):
         for radio in (self.off_radio, self.local_radio, self.api_radio):
             self.group.addButton(radio)
             layout.addWidget(radio)
-            radio.toggled.connect(self._selection_changed)
+            radio.toggled.connect(lambda checked: self._selection_changed() if checked else None)
         self.fields = QWidget()
         fields = QVBoxLayout(self.fields)
         self.model = QLineEdit()
@@ -58,6 +58,9 @@ class ProviderForm(QWidget):
         )
         fields.addWidget(self.privacy)
         self.check_button = button("Check connection")
+        self.check_button.setToolTip(
+            "Sends a tiny test prompt to the selected model. No project text is included."
+        )
         self.check_button.clicked.connect(self._check)
         fields.addWidget(self.check_button)
         layout.addWidget(self.fields)
@@ -67,11 +70,23 @@ class ProviderForm(QWidget):
         self.save_button.clicked.connect(self._save)
         layout.addWidget(self.save_button)
         self._loaded = False
+        self._dirty = False
+        self._scope = service.context_dir
+        for field in (self.model, self.endpoint, self.key):
+            field.textChanged.connect(self._edited)
         self.reload()
 
+    def _edited(self) -> None:
+        if self._loaded:
+            self._dirty = True
+
     def reload(self) -> None:
+        if self._dirty and self._scope == self.service.context_dir:
+            return  # Background project refreshes must not overwrite an edited model.
         config = self.service.load().llm
         self._loaded = False
+        self._scope = self.service.context_dir
+        self.key.clear()
         self.off_radio.setChecked(config.provider == "none")
         self.local_radio.setChecked(config.provider == "ollama")
         self.api_radio.setChecked(config.provider not in ("none", "ollama"))
@@ -87,8 +102,9 @@ class ProviderForm(QWidget):
             if config.provider in ("none", "ollama")
             else DEFAULT_ENDPOINTS.get(config.provider, config.base_url)
         )
-        self._loaded = True
         self._selection_changed()
+        self._loaded = True
+        self._dirty = False
 
     def provider(self) -> str:
         return (
@@ -105,6 +121,7 @@ class ProviderForm(QWidget):
         self.key.setVisible(mode == "openai-compatible")
         self.privacy.setVisible(mode == "openai-compatible")
         if self._loaded:
+            self._dirty = True
             config = self.service.load().llm
             if mode == "ollama":
                 self.endpoint.setText(config.ollama_host)
@@ -118,15 +135,21 @@ class ProviderForm(QWidget):
 
     def _save(self) -> None:
         values = (self.provider(), self.model.text(), self.endpoint.text(), self.key.text())
+        service = self.service
         self.save_button.setEnabled(False)
 
         def work(_emit: object) -> None:
-            self.service.save(*values)
+            service.save(*values)
 
         def done(_result: object) -> None:
             self.save_button.setEnabled(True)
+            if service.context_dir != self.service.context_dir:
+                return
+            current = (self.provider(), self.model.text(), self.endpoint.text(), self.key.text())
             self.key.clear()
-            self.message.setText("Model settings saved.")
+            if current == values:
+                self._dirty = False
+            self.message.setText(f"Model settings saved: {values[1] or 'offline'}.")
             self.on_saved()
 
         def failed(exc: Exception) -> None:
@@ -137,11 +160,13 @@ class ProviderForm(QWidget):
 
     def _check(self) -> None:
         values = (self.provider(), self.model.text(), self.endpoint.text(), self.key.text())
+        service = self.service
         self.check_button.setEnabled(False)
 
         def done(result: ProviderStatus) -> None:
             self.check_button.setEnabled(True)
-            self.message.setText(result.message)
+            if service.context_dir == self.service.context_dir:
+                self.message.setText(result.message)
 
         def failed(_exc: Exception) -> None:
             self.check_button.setEnabled(True)
@@ -149,4 +174,4 @@ class ProviderForm(QWidget):
                 "The connection could not be checked. Offline mode remains available."
             )
 
-        self.runner.run(lambda _emit: self.service.check(*values), on_done=done, on_error=failed)
+        self.runner.run(lambda _emit: service.check(*values), on_done=done, on_error=failed)

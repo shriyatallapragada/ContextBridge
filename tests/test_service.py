@@ -303,13 +303,16 @@ def test_check_ollama_when_not_running() -> None:
 
 
 def test_check_ollama_model_missing_and_ready(monkeypatch):
-    from contextbridge.providers.http import HTTPProvider
+    from contextbridge.providers.http import HTTPProvider, ModelNotFound
 
-    monkeypatch.setattr(HTTPProvider, "request", lambda *_args: {"models": [{"name": "other:1b"}]})
+    def missing(self, path, body=None):
+        if path == "/api/chat":
+            raise ModelNotFound("missing")
+        return {"models": [{"name": "other:1b"}]}
+
+    monkeypatch.setattr(HTTPProvider, "request", missing)
     assert "ollama pull" in check_ollama("http://localhost:11434", "qwen").message
-    monkeypatch.setattr(
-        HTTPProvider, "request", lambda *_args: {"models": [{"name": "qwen:latest"}]}
-    )
+    monkeypatch.setattr(HTTPProvider, "request", lambda *_args: {"message": {"content": "OK"}})
     assert check_ollama("http://localhost:11434", "qwen").ok
 
 

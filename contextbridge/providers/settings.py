@@ -9,7 +9,7 @@ from pathlib import Path
 
 from contextbridge.config import Config, global_config_path, load_config, save_config
 from contextbridge.errors import ContextBridgeError, UserError
-from contextbridge.providers import create_provider, credentials
+from contextbridge.providers import DEFAULT_ENDPOINTS, create_provider, credentials
 from contextbridge.providers.base import ProviderError
 from contextbridge.providers.http import HTTPProvider, validate_endpoint
 
@@ -97,24 +97,22 @@ class ProviderSettingsService:
                 config.llm.ollama_host = validate_endpoint(endpoint, local=True)
             else:
                 config.llm.base_url = validate_endpoint(endpoint)
+                if DEFAULT_ENDPOINTS.get(provider) != config.llm.base_url:
+                    config.llm.provider = "openai-compatible"
             selected = create_provider(config)
             assert isinstance(selected, HTTPProvider)
-            selected.timeout = 2
-            if provider == "ollama":
-                response = selected.request("/api/tags")
-                names = {item.get("name", item.get("model")) for item in response.get("models", [])}
-                if model not in names and model + ":latest" not in names:
-                    return ProviderStatus(
-                        False, f"The model is missing. Install it with ollama pull {model}."
-                    )
-                return ProviderStatus(
-                    True, "Ollama is running and the selected model is available."
-                )
+            if not model.strip():
+                return ProviderStatus(False, "Enter the model name to check.")
+            selected.model = model.strip()
+            selected.endpoint = endpoint.rstrip("/")
+            selected.max_tokens = 8
             selected.api_key = api_key or selected.api_key
-            if not selected.api_key:
+            if selected.is_cloud and not selected.api_key:
                 return ProviderStatus(False, "Enter an API key or save one in the OS keyring.")
-            selected.request("/models")
-            return ProviderStatus(True, "The API endpoint accepted the connection.")
+            selected.generate("Reply with OK.")
+            return ProviderStatus(
+                True, f"Model {selected.model!r} responded successfully at {selected.endpoint}."
+            )
         except ProviderError as exc:
             message = str(exc)
             if provider == "ollama" and not shutil.which("ollama"):
