@@ -37,6 +37,8 @@ class ProviderSettingsService:
         model: str = "",
         endpoint: str = "",
         api_key: str = "",
+        *,
+        polish_handoffs: bool | None = None,
     ) -> None:
         config = self.load()
         config.llm.provider = provider
@@ -72,6 +74,10 @@ class ProviderSettingsService:
         if provider == "openai-compatible":
             llm["base_url"] = config.llm.base_url
         data["llm"] = llm
+        if polish_handoffs is not None:
+            handoff = dict(data.get("handoff", {}))
+            handoff["polish"] = polish_handoffs
+            data["handoff"] = handoff
         old_key = None
         if provider == "openai-compatible" and api_key.strip():
             old_key = credentials.get_key(config.llm.base_url)
@@ -105,7 +111,7 @@ class ProviderSettingsService:
                 return ProviderStatus(False, "Enter the model name to check.")
             selected.model = model.strip()
             selected.endpoint = endpoint.rstrip("/")
-            selected.max_tokens = 8
+            selected.max_tokens = 1024 if selected.reasoning_model else 64
             selected.api_key = api_key or selected.api_key
             if selected.is_cloud and not selected.api_key:
                 return ProviderStatus(False, "Enter an API key or save one in the OS keyring.")

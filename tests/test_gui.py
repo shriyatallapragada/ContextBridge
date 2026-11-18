@@ -579,13 +579,13 @@ def test_ai_choice_is_saved_and_used(ready: Shell, project: Path) -> None:
     assert "No AI was needed" in handoff.preview_how.text()
 
 
-def test_smart_mode_without_ollama_falls_back_quietly(ready: Shell) -> None:
+def test_local_model_selection_keeps_handoff_polishing_opt_in(ready: Shell) -> None:
     ready.window.service.save_ai_settings("local")
     handoff = ready.page("handoff")
     handoff.choice_cards["claude"].click()
     find_button(handoff, "Preview the summary").click()
     ready.settle()
-    assert "wasn't reachable" in handoff.preview_how.text()
+    assert "No AI was needed" in handoff.preview_how.text()
     assert not ready.dialogs
 
 
@@ -851,9 +851,12 @@ def test_guide_renders_markdown_and_workflow(ready: Shell, project: Path) -> Non
     assert "# Readable heading" not in view.toPlainText()
     assert "<table" in view.toHtml()
     page.diagram.mode.setCurrentIndex(1)
-    assert len(page.diagram.items) == 5
-    page.diagram.items["3. Prepare"].setSelected(True)
-    assert any(arrow.isVisible() for _, _, arrow in page.diagram.arrows)
+    ready.settle()
+    assert page.diagram.data["view"] == "module"
+    assert page.diagram.items
+    node = page.diagram.data["nodes"][0]
+    page.diagram.items[node["id"]].setSelected(True)
+    assert node["purpose"] in page.diagram.details.toPlainText()
 
 
 def test_guide_rejects_documents_outside_project(ready: Shell, tmp_path: Path) -> None:
@@ -875,11 +878,15 @@ def test_guide_flowcharts_visible_and_refresh_preserves_selection(ready: Shell) 
         assert control.width() > 100
     page.section_buttons["Flowcharts"].click()
     assert page.tabs.currentWidget() is page.diagram
-    assert page.diagram.mode.currentIndex() == 1
+    assert page.diagram.mode.currentIndex() == 0
+    page.diagram.mode.setCurrentIndex(2)
+    ready.settle()
     find_button(page, "Refresh guide").click()
     ready.settle()
     assert page.tabs.currentWidget() is page.diagram
     assert page.section_buttons["Flowcharts"].isChecked()
+    assert page.diagram.mode.currentIndex() == 2
+    assert page.diagram.data["view"] == "flow"
     assert not page.tabs.tabBar().isVisible()
 
 
@@ -913,3 +920,213 @@ def test_chat_import_pdf_export_and_cancel_inflight(
     shell.settle()
     assert not page.transcript.toPlainText()
     assert page.import_button.isEnabled()
+
+
+def test_explainer_views_node_details_drilldown_and_mermaid(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextbridge.gui.diagrams import DiagramPanel
+    from contextbridge.project_map import scan_project, validate_mermaid
+
+    (tmp_path / "main.py").write_text(
+        '"""Start a sample request."""\nfrom storage import save\ndef main(): return save()\n'
+    )
+    (tmp_path / "storage.py").write_text('"""Save sample results."""\ndef save(): return True\n')
+    model = scan_project(tmp_path)
+    storage = next(
+        n for n in model.graph_nodes.values() if n.path == "storage.py" and n.kind == "module"
+    )
+    storage.ai_explanation = {"label": "AI-written", "text": "This part saves the sample result."}
+    copied: list[str] = []
+    monkeypatch.setattr("contextbridge.gui.diagrams.copy_text", copied.append)
+    panel = DiagramPanel()
+    try:
+        panel.set_model(model)
+        assert panel.data["view"] == "overview"
+        panel._open_part()
+        assert panel.data["view"] == "module"
+        panel.module.setCurrentIndex(panel.module.findData("storage.py"))
+        panel.items[storage.id].setSelected(True)
+        details = panel.details.toPlainText()
+        assert "AI-written: This part saves" in details
+        assert "Used by: main.py" in details and "Save sample results" in details
+        panel.mode.setCurrentIndex(2)
+        assert panel.data["view"] == "flow"
+        assert panel.arrows and all(arrow.isVisible() for _, _, arrow in panel.arrows)
+        panel.copy_button.click()
+        assert len(copied) == 1
+        validate_mermaid(copied[0])
+        assert "Copied" in panel.caption.text()
+        panel.mode.setCurrentIndex(0)
+        assert panel.data["view"] == "overview"
+    finally:
+        panel.close()
+        panel.deleteLater()
+        pump(qapp)
+
+
+def test_flutter_diagram_cards_theme_and_readable_layout(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    import shutil
+
+    from contextbridge.gui import theme
+    from contextbridge.gui.diagrams import DiagramPanel
+    from contextbridge.project_map import scan_project
+
+    root = tmp_path / "flutter"
+    shutil.copytree(Path(__file__).parent / "fixtures/flutter_project", root)
+    panel = DiagramPanel()
+    panel.resize(850, 1000)
+    panel.show()
+    try:
+        panel.set_model(scan_project(root))
+        pump(qapp)
+        assert len(panel.items) == 5
+        first_box = next(iter(panel.items.values()))
+        first_visible = panel.canvas.mapFromScene(first_box.rect().topLeft())
+        assert first_visible.x() >= 0 and first_visible.y() >= 0
+        assert panel.canvas.backgroundBrush().color().name() == theme.BG.lower()
+        assert panel.canvas.transform().m11() >= 0.85
+        fit = find_button(panel, "Fit")
+        assert fit.minimumWidth() >= 76
+        for node in panel.data["nodes"]:
+            box = panel.items[node["id"]]
+            assert not box.toolTip()
+            children = [child for child in box.childItems() if hasattr(child, "toPlainText")]
+            assert len(children) == 3
+            bounds = [child.mapRectToParent(child.boundingRect()) for child in children]
+            assert all(box.rect().contains(rect) for rect in bounds)
+            assert not any(a.intersects(b) for i, a in enumerate(bounds) for b in bounds[i + 1 :])
+            texts = [child.toPlainText() for child in children]
+            assert any(str(node["file_count"]) + " file" in text for text in texts)
+        panel.mode.setCurrentIndex(1)
+        panel.module.setCurrentIndex(panel.module.findData("docs/widgets/calendar.js"))
+        assert "Not explained yet" in panel.details.toPlainText()
+        assert "Connections not detected" in panel.details.toPlainText()
+        assert "Uses:" not in panel.details.toPlainText()
+        assert "Dart/Flutter" in panel.support.text()
+        panel.mode.setCurrentIndex(2)
+        assert panel.items and panel.module.currentData() == "lib/main.dart"
+    finally:
+        panel.close()
+        panel.deleteLater()
+        pump(qapp)
+
+
+def test_explain_button_requires_privacy_confirmation(
+    ready: Shell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    page = ready.page("guide")
+    page._load()
+    ready.settle()
+    page.diagram.mode.setCurrentIndex(1)
+    ready.settle()
+    service = page.service
+    calls: list[str] = []
+    notices: list[str] = []
+    monkeypatch.setattr(
+        type(service),
+        "file_explanation_notice",
+        lambda self, path: "Send only " + path + " to hosted provider?",
+    )
+    monkeypatch.setattr(
+        type(service),
+        "explain_file",
+        lambda self, path, **kw: calls.append(path) or "This file keeps cart data.",
+    )
+
+    def cancel(_parent: Any, _title: str, notice: str, *_args: Any) -> Any:
+        notices.append(notice)
+        return QMessageBox.StandardButton.Cancel
+
+    monkeypatch.setattr("contextbridge.gui.pages.guide.QMessageBox.question", cancel)
+    page.diagram.explain_button.click()
+    ready.settle()
+    assert notices and not calls
+    monkeypatch.setattr(
+        "contextbridge.gui.pages.guide.QMessageBox.question",
+        lambda *_: QMessageBox.StandardButton.Yes,
+    )
+    page.diagram.explain_button.click()
+    ready.settle()
+    assert calls == ["cart.py"]
+    assert "AI-written explanation cached" in page.status.text()
+
+
+def test_project_explain_budget_confirmation_progress_and_resume(
+    ready: Shell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PySide6.QtWidgets import QDialog, QSpinBox
+
+    page = ready.page("guide")
+    service = page.service
+    calls: list[tuple[int, int, Any]] = []
+    monkeypatch.setattr(
+        type(service),
+        "project_explanation_notice",
+        lambda self, requests, tokens: f"Hosted provider. {requests} requests / {tokens} tokens.",
+    )
+
+    def run(self: Any, **kwargs: Any) -> str:
+        calls.append((kwargs["max_requests"], kwargs["token_budget"], kwargs["component"]))
+        kwargs["notify"]("File 1/12: app/admin/page.tsx")
+        return "Stopped: rate limit hit; progress cached. Retry in 7s."
+
+    monkeypatch.setattr(type(service), "explain_project", run)
+    monkeypatch.setattr(
+        "contextbridge.gui.pages.guide.QDialog.exec", lambda self: QDialog.DialogCode.Rejected
+    )
+    page.explain_project_button.click()
+    ready.settle()
+    assert not calls
+
+    def confirm(dialog: Any) -> Any:
+        dialog.findChild(QSpinBox, "ExplanationRequestBudget").setValue(30)
+        dialog.findChild(QSpinBox, "ExplanationTokenBudget").setValue(60000)
+        assert any(
+            "30 requests / 60000 tokens" in control.text()
+            for control in dialog.findChildren(QLabel)
+        )
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr("contextbridge.gui.pages.guide.QDialog.exec", confirm)
+    page.explain_project_button.click()
+    ready.settle()
+    assert calls == [(30, 60000, None)]
+    assert "Stopped: rate limit" in page.status.text()
+    assert page.explain_project_button.isEnabled()
+    page.explain_project_button.click()
+    ready.settle()
+    assert len(calls) == 2
+
+
+def test_unexplained_component_has_inline_explain_button(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from PySide6.QtWidgets import QGraphicsProxyWidget
+
+    from contextbridge.gui.diagrams import DiagramPanel
+    from contextbridge.project_map import scan_project
+
+    (tmp_path / "root.ts").write_text("export const value = 1;\n")
+    panel = DiagramPanel()
+    requests: list[str] = []
+    panel.explain_component = lambda group, done: requests.append(group)
+    try:
+        panel.set_model(scan_project(tmp_path))
+        node = panel.data["nodes"][0]
+        assert node["label"] == "Project root" and node["purpose"] == "Not explained yet"
+        proxies = [
+            child
+            for child in panel.items[node["id"]].childItems()
+            if isinstance(child, QGraphicsProxyWidget)
+        ]
+        assert len(proxies) == 1
+        assert proxies[0].widget().text() == "Explain"
+        proxies[0].widget().click()
+        assert requests == ["."]
+    finally:
+        panel.close()
+        panel.deleteLater()
+        pump(qapp)

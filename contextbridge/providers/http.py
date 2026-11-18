@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
@@ -13,10 +16,12 @@ from contextbridge.core.sanitizer import sanitize
 from contextbridge.errors import ConfigError
 from contextbridge.providers.base import (
     ProviderError,
+    ProviderRateLimited,
     ProviderTimeout,
     ProviderUnavailable,
     validate_response,
 )
+from contextbridge.providers.limits import RateLimits
 
 
 class ModelNotFound(ProviderUnavailable):
@@ -52,6 +57,11 @@ class HTTPProvider:
     api_key: str = field(default="", repr=False)
     num_ctx: int = 16384
     provider: str = "openai-compatible"
+    rate_limits: RateLimits = field(default_factory=RateLimits, repr=False)
+
+    @property
+    def reasoning_model(self) -> bool:
+        return self.model.startswith(("openai/gpt-oss-", "gpt-oss-", "o1", "o3", "o4"))
 
     @property
     def is_cloud(self) -> bool:
@@ -74,9 +84,29 @@ class HTTPProvider:
                     headers=headers,
                 ) as response,
             ):
+                self.rate_limits.update(dict(response.headers), time.time())
                 if response.status_code == 429:
-                    raise ProviderUnavailable(
-                        "The provider rate limit was reached. Using the offline result."
+                    retry_after = None
+                    try:
+                        retry_after = max(0.0, float(response.headers["Retry-After"]))
+                    except (KeyError, ValueError):
+                        from datetime import UTC, datetime
+                        from email.utils import parsedate_to_datetime
+
+                        with contextlib.suppress(KeyError, ValueError, TypeError, OverflowError):
+                            retry_after = max(
+                                0.0,
+                                (
+                                    parsedate_to_datetime(response.headers["Retry-After"])
+                                    - datetime.now(UTC)
+                                ).total_seconds(),
+                            )
+                    delay = retry_after or self.rate_limits.wait(1, 0, time.time())
+                    raise ProviderRateLimited(
+                        "The provider rate limit was reached. "
+                        f"Retry after {delay:.1f}s. "
+                        "Using the offline result.",
+                        retry_after,
                     )
                 if response.status_code in (401, 403):
                     raise ProviderUnavailable(
@@ -206,6 +236,13 @@ class HTTPProvider:
                 "temperature": 0.2,
                 "max_tokens": self.max_tokens,
             }
+            if self.reasoning_model:
+                body.pop("max_tokens")
+                body["max_completion_tokens"] = self.max_tokens
+                if urlsplit(self.endpoint).hostname in {"api.groq.com", "api.openai.com"}:
+                    body["reasoning_effort"] = "low"
+                if urlsplit(self.endpoint).hostname == "api.groq.com":
+                    body["include_reasoning"] = False
             if schema is not None:
                 body["response_format"] = {
                     "type": "json_schema",
@@ -217,11 +254,30 @@ class HTTPProvider:
                 }
             result = self.request("/chat/completions", body)
             try:
-                content = result["choices"][0]["message"]["content"]
-            except (KeyError, IndexError, TypeError):
+                choice = result["choices"][0]
+                content = choice["message"].get("content")
+                if isinstance(content, list):
+                    content = "".join(
+                        part.get("text", "")
+                        for part in content
+                        if isinstance(part, dict)
+                        and part.get("type") in {"text", "output_text"}
+                        and isinstance(part.get("text"), str)
+                    )
+                if isinstance(content, str):
+                    content = re.sub(r"<think>.*?</think>", "", content, flags=re.S | re.I).strip()
+                    if "<think>" in content.lower():
+                        content = ""  # An unfinished reasoning block is never a final answer.
+            except (KeyError, IndexError, TypeError, AttributeError):
                 raise ProviderError("The provider returned no model response.") from None
         if not isinstance(content, str) or not content.strip():
-            raise ProviderError("The provider returned an empty model response.")
+            raise ProviderError(
+                self._safe_detail(
+                    f"Model {self.model!r} returned no final answer (empty model response). "
+                    "Reasoning-only output is not a successful response. "
+                    f"Output budget: {self.max_tokens} tokens; try a larger completion budget."
+                )
+            )
         return validate_response(content, schema)
 
     def complete(self, system: str, user: str, *, max_tokens: int) -> str:

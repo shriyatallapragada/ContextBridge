@@ -61,6 +61,9 @@ def handoff_command(
     no_llm: bool = typer.Option(
         False, "--no-llm", help="Skip LLMs and use the deterministic summary."
     ),
+    polish: bool = typer.Option(
+        False, "--polish", help="Explicitly send handoff wording to the model."
+    ),
     print_only: bool = typer.Option(
         False, "--print", help="Print the raw payload to stdout (messages go to stderr)."
     ),
@@ -84,7 +87,12 @@ def handoff_command(
             err_console.print(f"[yellow]cb:[/] {escape(message)}")
 
         prepared = service.prepare_handoff(
-            from_agent, to_agent, use_llm=not no_llm, budget=budget, force=force, notify=notify
+            from_agent,
+            to_agent,
+            use_llm=False if no_llm else True if polish else None,
+            budget=budget,
+            force=force,
+            notify=notify,
         )
         handoff, adapter = prepared.handoff, prepared.adapter
         cap = budget or min(

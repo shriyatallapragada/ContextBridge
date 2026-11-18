@@ -16,9 +16,13 @@ from contextbridge.cli.hook_cmd import hook_app
 from contextbridge.cli.import_chat_cmd import import_chat_command
 from contextbridge.cli.init_cmd import init_command
 from contextbridge.cli.log_cmd import log_command
+from contextbridge.cli.mcp_cmd import mcp_command
+from contextbridge.cli.provider_cmd import provider_app
 from contextbridge.cli.run_cmd import run_cmd_command
 from contextbridge.cli.search_cmd import search_command
+from contextbridge.cli.serve_cmd import serve_command
 from contextbridge.cli.status_cmd import status_command
+from contextbridge.cli.summarize_cmd import summarize_command, todo_app
 from contextbridge.cli.watch_cmd import watch_command
 
 app = typer.Typer(
@@ -57,6 +61,11 @@ def main(
 
 app.command("init")(init_command)
 app.command("configure")(configure_command)
+app.command("summarize")(summarize_command)
+app.command("serve")(serve_command)
+app.command("mcp")(mcp_command)
+app.add_typer(provider_app, name="provider")
+app.add_typer(todo_app, name="todo")
 app.command("log")(log_command)
 app.command("status")(status_command)
 app.command("watch")(watch_command)

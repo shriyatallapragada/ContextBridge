@@ -159,8 +159,8 @@ def test_migration_1_to_latest(tmp_path: Path, with_test_runs: bool) -> None:
     _v1_database(path, with_test_runs=with_test_runs)
     assert "test_runs" not in _MIGRATION_1
     with Database.open(path, migrate=False) as db:
-        assert db.migrate() == 2
-        assert db.schema_version == 3 == SCHEMA_VERSION
+        assert db.migrate() == SCHEMA_VERSION - 1
+        assert db.schema_version == SCHEMA_VERSION
         assert "test_runs" in _tables(db)
         s = db.create_session("main")
         assert db.add_test_run(s.id, "pytest", 0, passed=1).passed == 1

@@ -13,6 +13,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 from contextbridge.config import Config
 from contextbridge.core.sanitizer import sanitize
@@ -21,7 +22,7 @@ from contextbridge.synthesis.context_builder import (
     SessionContext,
     _age,
 )
-from contextbridge.synthesis.document import render_document
+from contextbridge.synthesis.document import TITLES, render_document
 from contextbridge.synthesis.facts import change_size, file_purpose, importance, is_test
 from contextbridge.synthesis.llm_client import LLMClient, LLMClientError, candidates
 from contextbridge.synthesis.token_counter import count_tokens
@@ -106,7 +107,9 @@ def truncate_lines(text: str, max_tokens: int) -> str:
 # ----- deterministic fallback -----------------------------------------------------------------
 
 
-def _file_summary(item: FileSummary, entrypoints: set[str] | None = None) -> str:
+def _file_summary(
+    item: FileSummary, entrypoints: set[str] | None = None, purpose: str | None = None
+) -> str:
     state = item.change_type + (", uncommitted" if item.uncommitted else "")
     recent = item.snippets[0] if item.snippets else ""
     numeric = re.fullmatch(r"[+][0-9]+ / -[0-9]+ lines", recent)
@@ -120,7 +123,10 @@ def _file_summary(item: FileSummary, entrypoints: set[str] | None = None) -> str
             summary = f"+{added} / -{removed} lines"
     if item.line_delta is not None:
         summary = f"+{item.line_delta[0]} / -{item.line_delta[1]} lines"
-    return f"{item.path} — {file_purpose(item.path, entrypoints)}. {state}" + (
+    role = (purpose or file_purpose(item.path, entrypoints)).rstrip(".")
+    if "name-based description" in role:
+        role = "Changed project file; contents have not been analyzed"
+    return f"{item.path} — {role}. {state}" + (
         f". {summary}" if summary else ". No diff summary recorded."
     )
 
@@ -141,14 +147,23 @@ def prioritized_files(ctx: SessionContext) -> list[FileSummary]:
 
 
 def project_sections(ctx: SessionContext) -> dict[str, list[str]]:
-    notes = [d.content for d in ctx.decisions if d.tag == "note"]
+    unique: dict[str, Any] = {}
+    for d in ctx.decisions:
+        if d.status not in {"dismissed", "superseded"}:
+            unique.setdefault(" ".join(d.content.casefold().split()).rstrip("."), d)
+    decisions = list(unique.values())
+    notes = [d.content for d in decisions if d.tag == "note" and d.session_id == ctx.session.id]
     goals = [text.split(":", 1)[1].strip() for text in notes if text.lower().startswith("goal:")]
     done = [
         re.sub(r"^(?:Done|Completed):\s*", "", text, flags=re.I)
         for text in notes
         if not text.lower().startswith(("goal:", "next:"))
     ]
-    steps = [d.content for d in ctx.decisions_tagged("todo")]
+    done = [
+        text if i == 0 else text.split(". ", 1)[0].rstrip(".") + "." for i, text in enumerate(done)
+    ]
+    done += ctx.older_work
+    steps = [d.content for d in decisions if d.tag == "todo" and d.status == "open"]
     steps += [text.split(":", 1)[1].strip() for text in notes if text.lower().startswith("next:")]
     source = [item for item in ctx.files if not is_test(item.path)]
     current = [
@@ -173,11 +188,28 @@ def project_sections(ctx: SessionContext) -> dict[str, list[str]]:
     current.insert(0, tests)
     if ctx.stack:
         current.append(f"Tech stack from dependency metadata — {ctx.stack}.")
-    done += [f"Recorded commit {commit.sha[:8]} — {commit.subject}" for commit in ctx.commits[:5]]
-    problems = [d.content for d in ctx.decisions if d.tag in ("blocker", "bug")]
+    done += [f"Recorded commit {commit.sha[:8]} — {commit.subject}" for commit in ctx.commits[:3]]
+    problems = [d.content for d in decisions if d.tag in ("blocker", "bug") and d.status == "open"]
     if ctx.tests_failing:
         problems.insert(0, "The last recorded test command failed. See Current state for counts.")
-    return {
+    changed = {item.path: item for item in prioritized_files(ctx)}
+    excluded = {item.path for item in ctx.files if change_size(item.snippets, item.line_delta)[1]}
+    paths = sorted(
+        set(changed) | (set(ctx.summary_files) - excluded),
+        key=lambda p: importance(
+            p,
+            changed[p].snippets if p in changed else [],
+            ctx.entrypoints,
+            line_delta=changed[p].line_delta if p in changed else None,
+        ),
+    )
+    reads = [
+        _file_summary(changed[p], ctx.entrypoints, ctx.file_purposes.get(p))
+        if p in changed
+        else f"{p} — {ctx.file_purposes[p]}"
+        for p in paths[:8]
+    ]
+    sections = {
         "Goal": goals[:1]
         or [
             ctx.goal
@@ -187,20 +219,28 @@ def project_sections(ctx: SessionContext) -> dict[str, list[str]]:
             )
         ],
         "Done": done or ["No completed work or changes logged."],
-        "Decisions": [d.content for d in ctx.decisions_tagged("architecture")]
+        "Decisions": [
+            d.content for d in decisions if d.tag == "architecture" and d.status == "open"
+        ]
         or ["No decisions logged."],
         "Current state": current,
         "Open problems": problems or ["No open problems logged."],
         "Next steps": steps or ["No next steps logged. Add a todo note before continuing."],
-        "Files to read first": [
-            _file_summary(item, ctx.entrypoints) for item in prioritized_files(ctx)
-        ]
-        or ["No meaningful project file changes to prioritize."],
+        "Files to read first": reads[:8] or ["No meaningful project file changes to prioritize."],
     }
+    if ctx.parts:
+        sections["What each part does"] = ctx.parts
+    return sections
+
+
+def _titles(ctx: SessionContext) -> tuple[str, ...]:
+    return (*TITLES[:-1], "What each part does", TITLES[-1]) if ctx.parts else TITLES
 
 
 def deterministic_summary(ctx: SessionContext, max_tokens: int) -> str:
-    return render_document(project_sections(ctx), max_tokens, header="").lstrip()
+    return render_document(
+        project_sections(ctx), max_tokens, header="", titles=_titles(ctx)
+    ).lstrip()
 
 
 def _polish(
@@ -321,5 +361,5 @@ def build_handoff(
     )
     payload = header + "\n\n" + result.summary + "\n"
     if count_tokens(payload) > cap:
-        payload = render_document(project_sections(ctx), cap, header=header)
+        payload = render_document(project_sections(ctx), cap, header=header, titles=_titles(ctx))
     return Handoff(payload, result.method, ctx.raw_tokens, count_tokens(payload), result.attempts)

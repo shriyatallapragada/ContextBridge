@@ -16,8 +16,18 @@ class ProviderUnavailable(ProviderError):
     pass
 
 
+class InvalidStructuredOutput(ProviderError):
+    pass
+
+
 class ProviderTimeout(ProviderError):
     pass
+
+
+class ProviderRateLimited(ProviderUnavailable):
+    def __init__(self, message: str, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 class Provider(Protocol):
@@ -37,7 +47,7 @@ def validate_response(text: str, schema: dict[str, Any] | None) -> str:
         try:
             jsonschema.validate(json.loads(text), schema)
         except (ValueError, jsonschema.ValidationError, jsonschema.SchemaError):
-            raise ProviderError("The model returned invalid structured output.") from None
+            raise InvalidStructuredOutput("The model returned invalid structured output.") from None
     return sanitize(text)
 
 

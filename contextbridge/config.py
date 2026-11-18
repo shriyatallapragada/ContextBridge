@@ -72,6 +72,7 @@ class CaptureConfig:
 
 @dataclass
 class HandoffConfig:
+    polish: bool = False
     target_tokens: int = 2000
     hard_cap_tokens: int = 2000
     # Cap on the context sent to the model; lowest-priority content is cut first.
@@ -85,16 +86,34 @@ class VectorConfig:
 
 
 @dataclass
+class SummaryConfig:
+    max_requests: int = 12
+    max_files: int = 600
+    chunk_chars: int = 4000
+    request_interval: float = 0.5
+    explanations: bool = False
+
+
+@dataclass
 class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     capture: CaptureConfig = field(default_factory=CaptureConfig)
     handoff: HandoffConfig = field(default_factory=HandoffConfig)
     vector: VectorConfig = field(default_factory=VectorConfig)
+    summary: SummaryConfig = field(default_factory=SummaryConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     def validate(self) -> None:
+        if not 1 <= self.summary.max_requests <= 50:
+            raise ConfigError("summary.max_requests must be between 1 and 50.")
+        if not 1 <= self.summary.max_files <= 2000:
+            raise ConfigError("summary.max_files must be between 1 and 2000.")
+        if not 256 <= self.summary.chunk_chars <= 6000 or self.summary.request_interval < 0:
+            raise ConfigError(
+                "Use summary.chunk_chars 256-6000 and a nonnegative request_interval."
+            )
         if self.llm.provider not in LLM_PROVIDERS:
             raise ConfigError(
                 f"Unknown llm.provider {self.llm.provider!r}; expected one of {LLM_PROVIDERS}."

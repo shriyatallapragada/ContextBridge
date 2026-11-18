@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PySide6.QtWidgets import QButtonGroup, QLineEdit, QRadioButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QButtonGroup, QCheckBox, QLineEdit, QRadioButton, QVBoxLayout, QWidget
 
 from contextbridge.gui.widgets import button, label
 from contextbridge.gui.workers import TaskRunner
@@ -64,6 +64,9 @@ class ProviderForm(QWidget):
         self.check_button.clicked.connect(self._check)
         fields.addWidget(self.check_button)
         layout.addWidget(self.fields)
+        self.polish = QCheckBox("Polish handoffs with model (uses quota)")
+        layout.addWidget(self.polish)
+        self.polish.toggled.connect(self._edited)
         self.message = label("", "Muted")
         layout.addWidget(self.message)
         self.save_button = button("Continue" if first_run else "Save model settings", "Primary")
@@ -83,8 +86,10 @@ class ProviderForm(QWidget):
     def reload(self) -> None:
         if self._dirty and self._scope == self.service.context_dir:
             return  # Background project refreshes must not overwrite an edited model.
-        config = self.service.load().llm
+        settings = self.service.load()
+        config = settings.llm
         self._loaded = False
+        self.polish.setChecked(settings.handoff.polish)
         self._scope = self.service.context_dir
         self.key.clear()
         self.off_radio.setChecked(config.provider == "none")
@@ -136,10 +141,11 @@ class ProviderForm(QWidget):
     def _save(self) -> None:
         values = (self.provider(), self.model.text(), self.endpoint.text(), self.key.text())
         service = self.service
+        polish = self.polish.isChecked()
         self.save_button.setEnabled(False)
 
         def work(_emit: object) -> None:
-            service.save(*values)
+            service.save(*values, polish_handoffs=polish)
 
         def done(_result: object) -> None:
             self.save_button.setEnabled(True)
@@ -147,7 +153,7 @@ class ProviderForm(QWidget):
                 return
             current = (self.provider(), self.model.text(), self.endpoint.text(), self.key.text())
             self.key.clear()
-            if current == values:
+            if current == values and polish == self.polish.isChecked():
                 self._dirty = False
             self.message.setText(f"Model settings saved: {values[1] or 'offline'}.")
             self.on_saved()

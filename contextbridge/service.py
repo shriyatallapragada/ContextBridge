@@ -18,7 +18,10 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from contextbridge.synthesis.project_summary import ProjectOverview
 
 from contextbridge.adapters.base_adapter import BaseAdapter
 from contextbridge.adapters.registry import all_adapters, get_adapter, resolve_name
@@ -41,7 +44,7 @@ from contextbridge.errors import (
     UnknownAgentError,
     UserError,
 )
-from contextbridge.project_map import ProjectMap, scan_project
+from contextbridge.project_map import ProjectMap, graph_view, scan_project
 from contextbridge.storage.db import (
     Decision,
     HandoffRecord,
@@ -64,6 +67,7 @@ from contextbridge.synthesis.compressor import (
     prioritized_files,
 )
 from contextbridge.synthesis.context_builder import SessionContext, build_context
+from contextbridge.synthesis.facts import is_test
 
 log = logging.getLogger("contextbridge")
 
@@ -410,7 +414,119 @@ class ProjectService:
         return GuideContent(files, progress_text, next_steps, suggestion_text)
 
     def project_map(self) -> ProjectMap:
-        return scan_project(self.root)
+        cached, explanations, components = [], [], []
+        if self.is_initialized():
+            with self.ws.open_db() as db:
+                cached = db.file_summaries()
+                explanations = db.file_explanations()
+                components = db.component_explanations()
+        return scan_project(
+            self.root,
+            cached=cached,
+            explanations=explanations,
+            components=components,
+            ignore_globs=self.ws.load_config().capture.ignore_globs,
+        )
+
+    def project_graph(
+        self, view: str = "overview", *, module: str | None = None, limit: int = 24
+    ) -> dict[str, Any]:
+        return graph_view(self.project_map(), view, module, limit)
+
+    def file_explanation_notice(self, path: str) -> str:
+        from contextbridge.providers import create_provider
+
+        cfg = self.ws.load_config().llm
+        if cfg.provider == "none":
+            raise UserError(
+                "Choose a model provider in Settings to explain a file. The overview works offline."
+            )
+        selected = create_provider(self.ws.load_config(), read_credentials=False)
+        endpoint = getattr(selected, "endpoint", cfg.provider)
+        return sanitize(
+            f"Explain {path} using {cfg.provider} at {endpoint} ({selected.model}). "
+            "A small excerpt of this file and its symbol/import names "
+            "will be sent to this provider. "
+            "Secrets are redacted; ignored files and keys are excluded. "
+            "The AI-written result is cached until this file changes. Continue?"
+        )
+
+    def explain_file(self, path: str, *, notify: Callable[[str], None] | None = None) -> str:
+        from contextbridge.synthesis.project_summary import ProjectSummarizer
+
+        self.file_explanation_notice(path)
+        if not self.is_initialized():
+            self.init(install_hook=False)
+        with self.ws.open_db() as db:
+            result = ProjectSummarizer(
+                self.root, db, self.ws.load_config(), notify=notify
+            ).summarize(only_file=path, explain=True)
+        explanation = next((f.ai_explanation for f in result.files if f.path == path), "")
+        if not explanation:
+            raise UserError(
+                "No valid explanation returned. "
+                + (" ".join(result.warnings) or "Try again or check the selected provider.")
+            )
+        return explanation
+
+    def project_explanation_notice(self, requests: int, tokens: int) -> str:
+        notice = self.file_explanation_notice("project files")
+        return notice.replace(
+            "A small excerpt of this file and its symbol/import names",
+            "Small file excerpts and their symbol/import names",
+        ) + (
+            f"\nBudget: {requests} requests; {tokens:,} reserved tokens "
+            "(estimated input plus maximum output, including retries and folder summaries). "
+            "Files are processed by importance; cached explanations are reused. "
+            "Folder summaries send file explanations only. "
+            "Rate limits stop the run with progress saved."
+        )
+
+    def explain_project(
+        self,
+        *,
+        max_requests: int = 20,
+        token_budget: int = 40000,
+        component: str | None = None,
+        notify: Callable[[str], None] | None = None,
+    ) -> str:
+        from dataclasses import replace
+
+        from contextbridge.project_map import _component_groups
+        from contextbridge.synthesis.project_summary import ProjectSummarizer
+
+        self.project_explanation_notice(max_requests, token_budget)
+        if not 1 <= max_requests <= 200 or not 1000 <= token_budget <= 1000000:
+            raise UserError("Choose 1-200 requests and 1,000-1,000,000 reserved tokens.")
+        selected = None
+        if component is not None:
+            model = self.project_map()
+            groups = _component_groups(
+                [n for n in model.graph_nodes.values() if n.kind in {"file", "module"}]
+            )
+            if component not in groups:
+                raise UserError("Choose a component from this project's overview.")
+            selected = {n.path for n in groups[component]}
+        if not self.is_initialized():
+            self.init(install_hook=False)
+        cfg = self.ws.load_config()
+        cfg = replace(cfg, summary=replace(cfg.summary, max_requests=max_requests))
+        with self.ws.open_db() as db:
+            summarizer = ProjectSummarizer(self.root, db, cfg, notify=notify)
+            result = summarizer.summarize(
+                explain_project=True,
+                explain=True,
+                token_budget=token_budget,
+                selected_files=selected,
+                component_group=component,
+            )
+        available = sum(bool(f.ai_explanation) for f in result.files)
+        return (
+            f"{'Stopped' if summarizer.stopped else 'Finished'}: {available} files explained; "
+            f"{result.requests}/{max_requests} requests; "
+            f"{result.tokens_reserved:,}/{token_budget:,} reserved tokens. "
+            + " ".join(result.warnings)
+        )
 
     def document_path(self, path: Path) -> Path:
         """Validate a document selection before scheduling a background read."""
@@ -524,12 +640,30 @@ class ProjectService:
 
     # ----- handoff -----------------------------------------------------------------------
 
+    def summarize(
+        self,
+        *,
+        no_llm: bool = False,
+        refresh: bool = False,
+        explain: bool | None = None,
+        cached_only: bool = False,
+        notify: Callable[[str], None] | None = None,
+    ) -> ProjectOverview:
+        from contextbridge.synthesis.project_summary import ProjectSummarizer
+
+        if not self.is_initialized():
+            self.init(install_hook=False)
+        with self.ws.open_db() as db:
+            return ProjectSummarizer(self.root, db, self.ws.load_config(), notify=notify).summarize(
+                no_llm=no_llm, refresh=refresh, explain=explain, cached_only=cached_only
+            )
+
     def prepare_handoff(
         self,
         from_agent: str | None = None,
         to_agent: str | None = None,
         *,
-        use_llm: bool = True,
+        use_llm: bool | None = None,
         budget: int | None = None,
         force: bool = False,
         notify: Callable[[str], None] | None = None,
@@ -564,12 +698,24 @@ class ProjectService:
                 root=ws.root,
                 observer=self._observer(),
             )
+            from contextbridge.synthesis.project_summary import ProjectSummarizer
+
+            overview = ProjectSummarizer(ws.root, db, config).summarize(
+                no_llm=use_llm is False, cached_only=True
+            )
+            context.goal = overview.goal or context.goal
+            context.file_purposes = {f.path: f.purpose for f in overview.files}
+            context.summary_files = [f.path for f in overview.files if not is_test(f.path)][:8]
+            if sum(d.tag == "note" and d.status == "open" for d in context.decisions) < 4:
+                context.parts = [
+                    f"{f.path} — {f.purpose}" for f in overview.files if not is_test(f.path)
+                ][:8]
         handoff = build_handoff(
             context,
             config,
             from_agent=label,
             to_agent=adapter.name if adapter else None,
-            no_llm=not use_llm,
+            no_llm=not (config.handoff.polish if use_llm is None else use_llm),
             notify=notify,
         )
         return PreparedHandoff(

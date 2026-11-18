@@ -25,7 +25,10 @@ offline and never needs Ollama; if Ollama is unavailable, it uses a deterministi
 On first launch, setup explains offline operation and lets you continue without a model,
 choose local Ollama, or enter an API endpoint and key. Connection checks run only when clicked.
 Each check sends a tiny test prompt to the exact model and endpoint entered in the form,
-with at most eight output tokens and no project context. A successful check does not save
+with no project context. Checks allow 64 output tokens for ordinary models and 1024
+completion tokens for recognized reasoning models. GPT-OSS on Groq uses low reasoning
+effort, reads only final content and reports a clear failure if no final answer is returned.
+A successful check does not save
 the form; click **Save model settings** to apply it. Missing-model errors show the selected
 model, attempted URL and offered models (or explain why the model list is unavailable).
 Artwork can be swapped without touching code: see [docs/GUI_ASSETS.md](docs/GUI_ASSETS.md).
@@ -44,8 +47,9 @@ uv tool install .          # puts `cb` on your PATH
 uv sync --all-extras && uv run cb --help
 ```
 
-Requires Python 3.11+ and `git`. Optional extras: `gui` (the desktop app), `vector`
-(semantic search), `cloud` (legacy SDK tooling), `build` (make the standalone app).
+Requires Python 3.11+ and `git`. Optional extras: `api` (the local REST API + dashboard),
+`mcp` (the MCP server), `gui` (the desktop app), `vector` (semantic search), `cloud`
+(legacy SDK tooling), `build` (make the standalone app).
 
 ## 5-minute quickstart
 
@@ -70,7 +74,12 @@ No LLM is needed. Without one, the handoff is built from a deterministic templat
 | `cb log "msg" [--tag note\|bug\|architecture\|blocker\|todo]` | Record a note in the current session |
 | `cb run -- <cmd>` | Run a command, stream its output, record pytest/jest/vitest/`go test`/`cargo test` results |
 | `cb status` | Dashboard: branch, changes and symbols, tests, decisions, last handoff, token stats |
+| `cb serve [--port 8765]` | Serve the REST API and the web dashboard on `127.0.0.1`, printing a one-session URL with its token |
+| `cb mcp` | Serve the MCP tools (`get_project_status`, `log_decision_or_todo`, ...) to coding agents over stdio |
 | `cb configure --provider none\|ollama\|openai-compatible [--global]` | Explicitly choose a model provider or offline operation |
+| `cb provider show` / `cb provider test` | Show effective settings without reading the key; test the selected model with a tiny prompt |
+| `cb summarize [--budget 2000] [--no-llm] [--refresh]` | Build a project overview and cache grounded per-file summaries in SQLite |
+| `cb todo list [--all]` / `cb todo resolve ID` / `cb todo dismiss ID` / `cb todo supersede OLD_ID NEW_ID` | Retain history while removing completed, obsolete or superseded items from next steps |
 | `cb handoff --to B [--from A] [--budget N] [--copy] [--dry-run] [--no-llm] [--print] [--force]` | Build, compress and write the handoff |
 | `cb search "query"` | Search decisions and changes (keyword, or semantic with the `vector` extra) |
 | `cb clear [--session] [--all] [--cleanup-adapters] [--yes]` | Archive the session, delete all data, and/or remove injected agent files |
@@ -79,6 +88,67 @@ Global options: `--repo PATH`, `--verbose`. Exit codes: `0` ok, `1` user error,
 `2` environment error (no git, not initialized), `3` LLM failure with no fallback.
 
 Optional shell alias for test runs: `alias t='cb run -- pytest'`.
+
+## Dashboard, API and MCP server
+
+Three ways to read the same state, all of them deterministic (0 tokens):
+
+```bash
+cb serve      # REST API + web dashboard on http://127.0.0.1:8765/ui/
+cb mcp        # stdio MCP server for coding agents
+```
+
+### Web dashboard
+
+Build it once, then serve:
+
+```bash
+cd frontend && npm install && npm run build     # writes frontend/dist
+cb serve                                        # prints http://127.0.0.1:8765/ui/#token=...
+```
+
+The URL already carries the session token in its fragment, so opening it is enough —
+browsers never send fragments to the server, and every `/v1/*` call still authenticates
+with `Authorization: Bearer <token>`. Without a built dashboard, `cb serve` prints the
+token on its own line instead.
+
+Three tabs:
+
+| Tab | Contents |
+|---|---|
+| **Overview & Timeline** | The persistent North Star intent (one row in SQLite) and the last 15 commits, read from `git log` + `git diff --stat` when the server boots — no manual command |
+| **To-Do & Tasks** | A checklist that writes straight to SQLite, plus the Chat Bridge box: paste a transcript and it becomes tasks using fixed parsing rules (checkboxes, `TODO:`/`ACTION:` lines, bullets under a *Next steps* heading) |
+| **Architecture Map** | React Flow rendering of the same deterministic AST graph JSON the desktop app uses (`GET /v1/graph`), with a Mermaid copy button |
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/dashboard` | Intent, task counts, commits and momentum in one call |
+| `GET` / `PUT /v1/intent` | Read or replace the North Star |
+| `GET` / `POST` / `PATCH` / `DELETE /v1/tasks` | The checklist (`?status=`, `?source=`) |
+| `GET /v1/commits[?refresh=true]` | The momentum window |
+| `POST /v1/chat-import` | `commit: false` previews transcript tasks, `true` stores them |
+| `GET /v1/graph`, `GET /v1/mermaid` | Deterministic import graph |
+
+The Vite dev server (`npm run dev`, port 5173) proxies `/v1` to `127.0.0.1:8765`.
+
+### MCP server
+
+```json
+{
+  "mcpServers": {
+    "contextbridge": { "command": "cb", "args": ["mcp"], "cwd": "/path/to/your/project" }
+  }
+}
+```
+
+Tools: `get_project_status`, `log_decision_or_todo`, `set_project_intent`, `list_tasks`,
+`get_git_history`, `get_architecture_graph`. Install the extra with `uv sync --extra mcp`.
+
+### The determinism rule
+
+Parsing, AST generation and timeline extraction are 100% deterministic and cost 0 tokens.
+Model calls are reserved for the optional natural-language file explanations, which are
+cached in SQLite and never required to render any tab.
 
 ## Per-agent setup
 
@@ -111,6 +181,98 @@ prefer. ContextBridge ignores its own injected content when it summarizes your c
 so handoffs do not grow on each other.
 
 ## How compression works
+
+### Project summaries, including fresh repositories
+
+```bash
+cb summarize --no-llm --budget 2000
+cb summarize --budget 2000
+cb summarize --refresh --budget 2000
+```
+
+Summarization works without notes or prior commits. It creates local storage when
+necessary, without installing hooks. Offline analysis reads the eligible file tree,
+README, dependency manifests (including optional GUI extras), declared entry points,
+Python AST/tree-sitter symbols and imports, and recent Git history. Source is parsed
+as data and never executed. Unparseable or unsupported files receive conservative
+static descriptions. Tests appear as counts, without test function listings.
+
+Model assistance selects at most eight ranked source files. Entry points, core modules
+and meaningful change sizes outrank other files. Each request contains one sanitized
+chunk with a 2500-token prompt check. New chunk plans start at no more than 1200
+characters (within the configured ceiling) and shrink further for token-per-minute
+limits. Cached legacy plans retain their boundaries so completed work stays reusable. It never
+constructs a whole-repository prompt. The model returns JSON with `purpose`,
+`key_symbols` and `depends_on`. To prevent invented facts, purposes are extractive
+selections from supplied documentation or static descriptions; symbols and imports
+must be present in the supplied evidence. Invalid JSON or ungrounded facts retry once.
+Chunk results merge locally, without another model call.
+
+SQLite caches file and partial-chunk summaries by source SHA-256, analysis version,
+provider/model/endpoint and chunk settings. Unchanged successful chunks are reused;
+changed content invalidates its old labels. `--refresh` bypasses reuse for this run,
+while retaining request limits. `Database.file_summaries()` exposes derived purposes,
+symbols and imports for future diagrams. Source chunks and prompts are never stored.
+
+Hosted transfers are announced before the first request. Sensitive files, secret
+folders, symlinks, configured ignores and nested Git ignore rules are excluded;
+prompts and stored descriptions are sanitized. The scanner defaults to 600 paths,
+256 KB per analyzed file and 8 MB total source. Limits are reported when reached.
+Generation requests default to 12 per run, spaced at least 0.5 seconds apart. Success
+and failure responses both update pacing from `x-ratelimit-limit-*`, `remaining-*`,
+`reset-*` and `Retry-After` headers. Groq's requests header is treated as a daily limit;
+token headers pace token usage per minute, including an output allowance. HTTP 429
+retries use exponential backoff and honor the longer server wait. Wait times are shown.
+A single wait over 60 seconds, more than 120 seconds of waiting per run, or repeated
+rate limiting stops model work and keeps offline descriptions. Limits and partial
+chunk progress are persisted; rerunning resumes without repeating successful chunks
+or ignoring an outstanding cooldown. Missing keys, timeouts and provider failures also
+preserve offline output. Progress goes to stderr, using the same analyzed-file total
+as Analysis. Folder counts separately identify all eligible files and analyzed files.
+
+Optional beginner explanations are enabled with `cb summarize --explain`, or
+`summary.explanations: true`. Each contains 1-2 sentences and is labeled **AI-written**.
+They are stored separately in SQLite (`Database.file_explanations()`), never substituted
+for grounded purposes. The model must mark code references with backticks; named files,
+functions/classes, qualified identifiers and declared references are checked against
+that file's symbols/imports. Invalid explanations are dropped. Valid ones are cached
+by content hash and provider profile, and invalidated when the source changes. They
+are available as optional labels for Step 6.
+
+Configurable bounds in global or project config:
+
+```json
+{"summary": {"max_requests": 12, "max_files": 600, "chunk_chars": 4000, "request_interval": 0.5}}
+```
+
+Handoffs use offline or matching cached model descriptions for Goal and the prioritized
+reading list. With fewer than four logged notes, they also include **What each part
+does**. Generating a handoff does not initiate repository model analysis; run
+`cb summarize` explicitly to populate the model cache. Optional handoff wording
+polishing is **off by default**, including dry runs. Use `cb handoff --polish`, check
+**Polish handoffs with model (uses quota)** in GUI Settings, or set `handoff.polish: true`.
+`--no-llm` overrides that setting. Default handoffs use no model requests. Only the latest
+completion note in the active session has full detail; older work uses one-line
+summaries. Resolved todos are omitted from Done, commits are capped at three, duplicate
+entries are suppressed and dismissed/superseded items are omitted. The summary shows a
+folder-level inventory instead of an alphabetical list of files.
+
+For a Groq key already saved in the GUI, enable the same endpoint and your chosen model
+without entering the key again:
+
+```bash
+cb configure --provider openai-compatible --model openai/gpt-oss-120b \
+  --endpoint https://api.groq.com/openai/v1
+cb provider show
+cb provider test
+cb summarize --budget 2000
+cb handoff --to codex --dry-run
+```
+
+Use `cb todo list` to find logged IDs, then `cb todo resolve dec_...` for completed work
+or `cb todo dismiss dec_...` for obsolete work. `cb todo supersede OLD_ID NEW_ID` also
+works for note IDs, so revised completion claims can explicitly replace older ones.
+History stays available through `cb todo list --all` and the database.
 
 `cb handoff` gathers the session's decisions, commits, changed files and symbols,
 uncommitted and untracked files, and the last test run. It then fits that to
@@ -391,7 +553,7 @@ uv run cb import-chat --file tests/fixtures/flutter_lab_chat.txt --budget 2000
 uv run pytest -q tests/test_chat_turns.py tests/test_handoff_followup.py
 ```
 
-The deterministic document is complete without a model. Optional model polishing
+The deterministic document is complete without a model. Explicitly opted-in model polishing
 receives only the selected handoff lines. Accepted responses preserve every word,
 path, number, negation, and line order, allowing spacing and final punctuation
 changes. Invalid responses retry once and fall back to the deterministic document.
@@ -399,4 +561,141 @@ This intentionally limits model rewriting so factual wording remains verifiable.
 
 ```bash
 uv run pytest -q tests/test_handoff_quality.py tests/test_compressor.py
+```
+
+## Project explainer prototype (Step 6)
+
+The overview groups source files into five to eight folder-based components where
+there are enough real folders (small projects can have fewer). Cards show a plain
+name, a short description and the analyzed file count. Root-level source files
+appear as **Project root**. Unexplained cards say **Not explained yet** and offer
+an **Explain** button. Folder descriptions never come from a folder name: files
+are explained first, then their explanations are reduced into an **AI-written**
+component summary. Partial coverage is shown as a file/explained count. File changes
+or changed explanation inputs invalidate the component summary.
+Overview arrows come only from detected local imports, never guesses from folder
+names. Missing connections are explained rather than invented.
+
+Import parsing supports Python, Dart/Flutter `package:` imports within the current
+package and relative imports, plus local JavaScript/TypeScript ES imports and
+`require`. TS/JS resolves `baseUrl`, wildcard `paths` aliases and index files from
+`tsconfig.json` or `jsconfig.json`, including bounded local config inheritance.
+Configs outside the project and package-based inheritance are skipped. Flutter package names come from `pubspec.yaml`; `lib/main.dart` is the
+startup file. Python entry points come from package scripts or main/app/server
+files; JavaScript/TypeScript uses package `main`/`bin` and index/main files. Other
+languages currently show file boxes without import/call parsing. Only Python calls
+are resolved. A flow with no detected startup file explains that limitation and
+lets you choose any starting file; a project with no source files shows an empty
+state with guidance.
+
+File detail says **Not explained yet** when neither documentation nor a useful
+cached description exists. **Explain this file** uses the selected provider only
+after a privacy confirmation. It sends a small redacted excerpt of that file and
+its names, validates the response, labels it **AI-written**, and caches it by file
+content and provider/model. Unchanged files reuse that cache; changing the file
+invalidates the explanation. Choose a provider in Settings first. Refreshing or
+opening a diagram never starts a model request. Uses/Used by appear only when
+connections were detected.
+
+**Explain project** processes eligible files by importance without the eight-file
+limit used by regular summarization. Its privacy dialog lets you choose a request
+budget (1–200, default 20) and a reserved-token budget (default 40,000). Each request
+reserves estimated prompt/schema input plus maximum output tokens; this is a
+conservative estimate, not a billing meter. File explanations, folder reductions,
+invalid-JSON retries and provider requests share those budgets. Progress shows file
+positions, cache reuse, requests and reserved tokens. Requests are paced using the
+provider's rate headers and configured spacing. A rate limit stops the action with
+a retry time and an explicit cache/resume message. Run it again to continue;
+unchanged files and completed reduction chunks are reused. **Explain component**
+uses the same dialog and pipeline for only that component's files. Ordinary graph
+refreshes never generate explanations.
+
+Folder reductions receive validated file explanations, never source code, and use
+the same file/function/class-name validation as file explanations. Large groups
+are reduced in small cached batches. Invalid names are rejected. The existing
+inventory and file-size safety bounds still apply; request/token exhaustion leaves
+all completed progress cached.
+
+Next.js app-router files are named by URL convention: `app/admin/page.tsx` becomes
+**Admin page (/admin)**, `app/layout.tsx` becomes **Root layout (/)**, and
+`app/api/events/route.ts` becomes **API route (/api/events)**. Route groups and
+parallel-slot folders are omitted from displayed URLs. Flutter `lib/main.dart` is
+labeled as startup. Literal Express `app`/`router` routes and Flask decorators are
+shown on their files. Dynamic routes assembled in code and router mount prefixes
+are outside this prototype's route detection.
+
+The canvas uses the app's cream theme. Explanations and counts appear inside the
+cards; default scaling stays readable, with scrolling for larger graphs.
+
+The API, extra views and Mermaid refinement are deferred during this prototype
+iteration. The existing optional interfaces below remain available.
+
+The existing **Project guide → Flowcharts** page now uses the same graph JSON as
+our local API. Open a project with `uv run cb gui`, choose **Refresh guide**, then
+select **Project overview**, **Inside one file**, or **How a request travels**.
+The file selector chooses a file or a starting point. Click a box for its purpose,
+related files, what it uses and what uses it. **Open this part** opens file detail;
+**Expand** increases the node limit. **Copy as Mermaid** copies a deterministic
+diagram for a fenced `mermaid` block in Markdown.
+
+Graphs work offline and never ask a model to invent connections. Current cached
+per-file purposes and optional beginner explanations from `cb summarize --explain`
+are reused only while the file's content hash matches. Beginner explanations
+remain separately labeled **AI-written**. Refreshing a graph or reading API data
+does not call a model or read API keys.
+
+The engine is independent of Qt and FastAPI. Nodes have stable IDs, kind, relative
+path, folder group, grounded purpose and optional AI-written text. Edges represent
+local imports and statically resolved calls. Python files expose classes/functions;
+other supported source files currently expose file nodes. The request view shows
+possible routes, not a recording of an executed request: dynamic dispatch and
+non-Python internals may be missing. Scans read at most 180 source files, 200
+folders and approximately 2 MB, with a 64 KiB per-file limit. Ignored, hidden,
+secret-related and linked files are excluded. Views allow 2–60 nodes (12 in the
+embedded GUI, 24 expanded/API by default), with **+N more** for omitted nodes.
+Scan and edge limits are reported in graph metadata.
+
+Install and start the optional server explicitly:
+
+```bash
+uv sync --extra api --extra gui --extra dev
+uv run cb serve --port 8765
+```
+
+It binds exclusively to `127.0.0.1`. Startup prints a new random session token;
+restarting invalidates the old token. Every route and method requires
+`Authorization: Bearer <token>`, including the API schema. Tokens are never
+accepted in URLs. There is no unauthenticated docs page or CORS exception.
+Keep the token local. In another terminal, read it without saving it to shell history:
+
+```bash
+read -rs 'CB_SESSION_TOKEN?Paste session token: '; echo
+curl -H "Authorization: Bearer $CB_SESSION_TOKEN" http://127.0.0.1:8765/v1/status
+curl -H "Authorization: Bearer $CB_SESSION_TOKEN" 'http://127.0.0.1:8765/v1/graph?view=overview'
+curl -H "Authorization: Bearer $CB_SESSION_TOKEN" 'http://127.0.0.1:8765/v1/graph?view=module&module=contextbridge/service.py'
+curl -H "Authorization: Bearer $CB_SESSION_TOKEN" 'http://127.0.0.1:8765/v1/graph?view=flow&module=contextbridge/main.py&limit=12'
+curl -H "Authorization: Bearer $CB_SESSION_TOKEN" 'http://127.0.0.1:8765/v1/mermaid?view=flow&module=contextbridge/main.py' > request-flow.mmd
+curl -H "Authorization: Bearer $CB_SESSION_TOKEN" http://127.0.0.1:8765/v1/summary
+curl -H "Authorization: Bearer $CB_SESSION_TOKEN" http://127.0.0.1:8765/v1/openapi
+curl -H "Authorization: Bearer $CB_SESSION_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"to_agent":"codex","budget":2000}' http://127.0.0.1:8765/v1/handoffs/preview
+unset CB_SESSION_TOKEN
+```
+
+These graph file paths are for ContextBridge itself; choose paths from
+`meta.available_modules` and `meta.entrypoints` for another project. POST to
+`/v1/handoffs` with the same body to write the destination handoff. Preview may
+initialize local project state, but does not write an adapter handoff. Handoffs
+are deterministic by default; only an explicit `"polish": true` requests model
+polishing. Stop the server with **Ctrl-C**. It never starts in the background.
+
+Validation commands:
+
+```bash
+uv run pytest -q tests/test_explainer_graph.py tests/test_local_api.py tests/test_engine_boundary.py
+uv run pytest -q tests/test_flutter_explainer.py tests/test_next_explainer.py
+uv run pytest -q tests/test_gui.py -k 'guide or explainer or flutter or explain_button'
+uv run ruff check contextbridge tests
+uv run mypy contextbridge
+uv run cb run -- uv run pytest -q
 ```

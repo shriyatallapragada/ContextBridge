@@ -10,6 +10,7 @@ import typer
 from typer.testing import CliRunner
 
 from contextbridge.main import app
+from contextbridge.storage.db import SCHEMA_VERSION
 
 runner = CliRunner()
 
@@ -30,7 +31,7 @@ def _decisions(repo: Path) -> list[tuple[str, str]]:
 def test_init_creates_workspace(git_repo: Path) -> None:
     code, out = cb("init")
     assert code == 0, out
-    assert "Database schema at v3" in out
+    assert f"Database schema at v{SCHEMA_VERSION}" in out
     ctx = git_repo / ".contextbridge"
     assert (ctx / "state.db").is_file()
     assert (ctx / "config.json").is_file()

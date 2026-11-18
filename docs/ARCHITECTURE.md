@@ -25,14 +25,17 @@ The whole thing is about 5,400 lines of Python in `contextbridge/`, covered by 3
 
 | Package | Files | Role |
 |---|---|---|
-| `main.py`, `cli/` | `init_cmd`, `log_cmd`, `run_cmd`, `hook_cmd`, `status_cmd`, `handoff_cmd`, `search_cmd`, `clear_cmd`, `common` | The Typer commands. Thin: they parse options and call into the layers below |
-| `core/` | `git_observer`, `ast_parser`, `shell_listener`, `sanitizer` | Reading the outside world (git, source code, command output) and scrubbing secrets |
+| `main.py`, `cli/` | `init_cmd`, `log_cmd`, `run_cmd`, `hook_cmd`, `status_cmd`, `handoff_cmd`, `search_cmd`, `clear_cmd`, `serve_cmd`, `mcp_cmd`, `common` | The Typer commands. Thin: they parse options and call into the layers below |
+| `core/` | `git_observer`, `git_history`, `transcript_tasks`, `ast_parser`, `shell_listener`, `sanitizer` | Reading the outside world (git, source code, command output, pasted transcripts) and scrubbing secrets |
 | `storage/` | `db`, `workspace`, `vector_store` | SQLite schema, the `.context/` folder, `state.json`, session logic, optional Chroma index |
 | `synthesis/` | `token_counter`, `context_builder`, `llm_client`, `compressor` | Turning stored data into a budgeted handoff payload |
 | `adapters/` | `base_adapter`, `claude_adapter`, `cursor_adapter`, `generic_adapter`, `registry` | Writing the payload into agent files, and removing it again |
+| `dashboard.py` | | Deterministic dashboard operations (North Star, tasks, momentum) shared by the API and the MCP server |
+| `local_api.py`, `mcp_server.py` | | The FastAPI loopback server and the stdio MCP server. Front ends only: they import the engine, never the reverse |
+| `frontend/` | Vite + React + Tailwind + React Flow | The web dashboard; built to `frontend/dist` and served at `/ui` |
 | `config.py`, `errors.py` | | Layered configuration, and exceptions that carry exit codes |
 
-**Dependencies run one way**: `cli` -> `synthesis`/`adapters` -> `storage`/`core` -> `sanitizer`. The one slight exception is that `git_observer` imports the marker constants from `adapters`, so it can ignore injected content.
+**Dependencies run one way**: `cli`/`local_api`/`mcp_server` -> `dashboard` -> `synthesis`/`adapters` -> `storage`/`core` -> `sanitizer`. The one slight exception is that `git_observer` imports the marker constants from `adapters`, so it can ignore injected content.
 
 ---
 
@@ -481,7 +484,7 @@ $ cb clear --cleanup-adapters              -> CLAUDE.md is byte-identical to bef
 - **Symbol mapping is syntactic.** It doesn't resolve references, so a changed constant that affects ten functions registers only where it was edited. Languages outside the six get only the hunk-header fallback, which is approximate.
 - **Per-commit attribution.** Merge commits record the first-parent diff, and commits made during a rebase are picked up late, on the next commit.
 - **`handed_off` is defined but unused.** Sessions stay active after a handoff, on purpose.
-- **Roadmap features aren't built**: the MCP server, more agent adapters, auto-trigger on rate limits, and encrypted export.
+- **Roadmap features aren't built**: more agent adapters, auto-trigger on rate limits, and encrypted export. (The MCP server shipped in v0.2.0 — see section 19.)
 
 ---
 
@@ -511,3 +514,51 @@ It lives in `contextbridge/gui/` and is deliberately thin.
   (`docs/PACKAGING.md`).
 - **Choices**: offline, local Ollama or an API endpoint. API key inputs are masked and
   saved through the OS keyring. Offline mode is the default and needs no model.
+
+---
+
+## 19. The v0.2.0 dashboard, API and MCP server
+
+Three front ends over one deterministic state store. Nothing here calls a model.
+
+**Storage (migration v7).** `project_intent` holds a single row (`id = 1`) with the
+persistent North Star text; `git_history` holds the parsed momentum window; `decision_logs`
+gained a `source` column (`manual`, `chat`, `mcp`, ...) so a task knows where it came from.
+To-dos remain `decision_logs` rows with `tag='todo'` — `cb todo list` and the handoff's
+"Next steps" already read them, so the dashboard adds no second source of truth.
+
+**`core/git_history.py`.** On server boot, and on demand with `?refresh=true`, it runs
+`git log --max-count=15 --format=%H%x1f%h%x1f%an%x1f%cI%x1f%s%x1f%P%x1e` and one
+`git diff --stat <parent> <sha>` per commit (the empty-tree hash stands in for a root
+commit's parent). Output is parsed by pure functions, dates are normalised to UTC, and the
+window is stored wholesale, so the stored timeline always equals what git would report.
+A repository with no commits, no git, or a failing command yields an empty window rather
+than an error.
+
+**`core/transcript_tasks.py`.** Chat Bridge import with three fixed rules in order —
+markdown checkboxes (with their checked state), `TODO:`/`ACTION:`/`NEXT:` marker lines, and
+bullets under a *Next steps* / *Action items* heading. Code fences are skipped, results are
+deduplicated, sanitized and capped at 100 tasks. The same transcript always yields the same
+tasks, each carrying its source line number.
+
+**`dashboard.py`.** The one writer/reader for intent, tasks and momentum. `local_api.py`
+and `mcp_server.py` are both thin adapters over it, which is why the REST API and the MCP
+tools can't disagree.
+
+**`local_api.py`.** Existing bearer-token middleware, plus `/v1/dashboard`, `/v1/intent`,
+`/v1/tasks`, `/v1/commits`, `/v1/chat-import`, and a static mount at `/ui` serving
+`frontend/dist`. The `/ui` shell is the only unauthenticated path (it contains no project
+data); CORS is added last so the Vite dev server on 5173 can preflight, while every real
+request still carries the token. `cb serve` prints the dashboard URL with the token in the
+fragment — browsers never send fragments to a server.
+
+**`mcp_server.py`.** The official `mcp` Python SDK over stdio (`cb mcp`), exposing
+`get_project_status`, `log_decision_or_todo`, `set_project_intent`, `list_tasks`,
+`get_git_history` and `get_architecture_graph`. The project directory comes from the
+`project_dir` argument, `CB_PROJECT_DIR`, or the working directory, in that order.
+
+**`frontend/`.** Vite + React + Tailwind + React Flow. Three tabs — Overview & Timeline
+(North Star, momentum cards, commit timeline), To-Do & Tasks (checklist plus the Chat
+Bridge import box) and Architecture Map (React Flow over `GET /v1/graph`, with a Mermaid
+copy button). It holds no parsing logic: transcripts, git and AST work all happen on the
+Python side, so the browser spends no tokens either.

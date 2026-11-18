@@ -111,6 +111,10 @@ class SessionContext:
     project_files_changed: int = 0
     entrypoints: set[str] = field(default_factory=set)
     tests_stale: bool = False
+    file_purposes: dict[str, str] = field(default_factory=dict)
+    summary_files: list[str] = field(default_factory=list)
+    parts: list[str] = field(default_factory=list)
+    older_work: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.raw_tokens = count_tokens(render_items(self.items))
@@ -384,7 +388,7 @@ def build_context(
     root: Path | None = None,
 ) -> SessionContext:
     """Collect everything known about ``session`` into a SessionContext."""
-    decisions = db.list_decisions(session.id)
+    decisions = [d for d in db.list_decisions(session.id) if d.status in {"open", "resolved"}]
     changes = db.list_file_changes(session.id)
     commits: list[CommitInfo] = []
     branch = session.branch_name
@@ -446,4 +450,5 @@ def build_context(
         test_files_changed=sum(is_test(item.path) for item in all_files),
         project_files_changed=sum(not is_test(item.path) for item in all_files),
         entrypoints=entrypoints,
+        older_work=db.older_work(session.id),
     )

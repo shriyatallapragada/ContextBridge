@@ -1,0 +1,4 @@
+{
+  // Local aliases, with JSONC comments and a trailing comma.
+  "compilerOptions": {"baseUrl":".", "paths":{"@/*":["./*"]},},
+}

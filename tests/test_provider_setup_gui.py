@@ -100,8 +100,29 @@ def test_typed_model_survives_refresh_check_and_save_then_reaches_cli(git_repo, 
     wait_for(app, lambda: bool(saved))
     form.reload()
     assert form.model.text() == service.load().llm.model == model
-    result = CliRunner().invoke(cli_app, ["handoff", "--to", "codex", "--dry-run"])
+    result = CliRunner().invoke(cli_app, ["handoff", "--to", "codex", "--dry-run", "--polish"])
     assert result.exit_code == 0 and "openai-compatible" in result.output
     assert len(calls) == 2 and all(call[0] == model and call[1] == endpoint for call in calls)
-    assert calls[0][3]["max_tokens"] == 8
+    assert calls[0][3]["max_tokens"] == 64
+    form.close()
+
+
+def test_polish_is_opt_in_and_saved_by_the_settings_form(tmp_path):
+    from contextbridge.gui.provider_form import ProviderForm
+    from contextbridge.gui.workers import TaskRunner
+    from contextbridge.providers.settings import ProviderSettingsService
+    from tests.gui_helpers import wait_for
+
+    app = QApplication.instance() or QApplication([])
+    configure_app(app)
+    service = ProviderSettingsService(tmp_path)
+    saved = []
+    form = ProviderForm(TaskRunner(), service, lambda: saved.append(True))
+    assert not form.polish.isChecked()
+    form.polish.setChecked(True)
+    form.save_button.click()
+    wait_for(app, lambda: bool(saved))
+    assert service.load().handoff.polish
+    form.reload()
+    assert form.polish.isChecked()
     form.close()

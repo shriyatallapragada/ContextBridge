@@ -43,7 +43,7 @@ def test_check_generates_with_exact_unsaved_model_and_key(tmp_path, mock_http, m
     assert len(calls) == 1
     assert calls[0].method == "POST" and str(calls[0].url) == ENDPOINT + "/chat/completions"
     body = json.loads(calls[0].content)
-    assert body["model"] == MODEL and body["max_tokens"] <= 8
+    assert body["model"] == MODEL and body["max_tokens"] == 64
     assert body["messages"] == [{"role": "user", "content": "Reply with OK."}]
     assert calls[0].headers["Authorization"] == "Bearer unsaved-private-key"
     assert not service.path.exists()  # A check never saves a choice or key.
@@ -132,7 +132,7 @@ def test_ollama_check_also_generates_with_selected_model(tmp_path, mock_http):
     assert status.ok and len(calls) == 1
     assert calls[0].url.path == "/api/chat"
     body = json.loads(calls[0].content)
-    assert body["model"] == "local-model" and body["options"]["num_predict"] == 8
+    assert body["model"] == "local-model" and body["options"]["num_predict"] == 64
 
 
 def test_saved_model_reaches_cli_and_missing_model_details_reach_output(
@@ -154,7 +154,7 @@ def test_saved_model_reaches_cli_and_missing_model_details_reach_output(
         return httpx.Response(200, json={"data": [{"id": "offered-model"}]})
 
     mock_http(respond)
-    result = CliRunner().invoke(app, ["handoff", "--to", "codex", "--dry-run"])
+    result = CliRunner().invoke(app, ["handoff", "--to", "codex", "--dry-run", "--polish"])
     assert result.exit_code == 0, result.output
     assert MODEL in result.output and "offered-model" in result.output
     assert "api.groq.com" in result.output and "private-key" not in result.output

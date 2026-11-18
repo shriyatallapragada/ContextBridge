@@ -78,7 +78,10 @@ def render_document(
                 )
             bodies[title][0] = text[: max(1, len(text) * 3 // 4 - 1)].rstrip("…") + "…"
     # Extend the reserved items first. Files receive the remaining space last.
-    order = (*ESSENTIAL, *(title for title in titles if title not in ESSENTIAL))
+    order = (
+        *(title for title in ESSENTIAL if title in titles),
+        *(title for title in titles if title not in ESSENTIAL),
+    )
     for title in order:
         original = bodies[title][0]
         bodies[title][0] = clean[title][0]

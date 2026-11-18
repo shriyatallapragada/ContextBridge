@@ -120,7 +120,7 @@ def test_handoff_uses_mocked_llm_and_reports_counts(
             return json.dumps({"lines": json.loads(user)["lines"]})
 
     monkeypatch.setattr(compressor, "candidates", lambda cfg, no_llm=False: [Fake()])
-    result = runner.invoke(app, ["handoff", "--dry-run", "--print"])
+    result = runner.invoke(app, ["handoff", "--dry-run", "--print", "--polish"])
     assert result.exit_code == 0, result.output
     assert "Prices are integer cents" in result.stdout
     assert "Here is the summary" not in result.stdout  # preamble stripped
@@ -138,7 +138,7 @@ def test_cloud_fallback_prints_notice(session_repo: Path, monkeypatch: pytest.Mo
             return "- cloud summary"
 
     monkeypatch.setattr(compressor, "candidates", lambda cfg, no_llm=False: [Cloud()])
-    result = runner.invoke(app, ["handoff", "--dry-run", "--print"])
+    result = runner.invoke(app, ["handoff", "--dry-run", "--print", "--polish"])
     assert result.exit_code == 0
     assert "Sending sanitized handoff wording to groq" in result.stderr
 

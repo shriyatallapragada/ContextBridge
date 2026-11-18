@@ -3,19 +3,26 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from PySide6.QtCore import QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
+    QFormLayout,
     QGridLayout,
     QHBoxLayout,
+    QMessageBox,
     QScrollArea,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QVBoxLayout,
 )
 
 from contextbridge.errors import UserError
@@ -23,7 +30,7 @@ from contextbridge.gui.diagrams import DiagramPanel
 from contextbridge.gui.markdown_view import MarkdownView
 from contextbridge.gui.pages.base import Host, ProjectPage
 from contextbridge.gui.widgets import button, label
-from contextbridge.service import ProjectMap, Snapshot
+from contextbridge.service import Snapshot
 
 
 class GuidePage(ProjectPage):
@@ -38,6 +45,9 @@ class GuidePage(ProjectPage):
         refresh.clicked.connect(self._load)
         tools = QHBoxLayout()
         tools.addWidget(refresh)
+        self.explain_project_button = button("Explain project")
+        self.explain_project_button.clicked.connect(lambda: self._explain_project())
+        tools.addWidget(self.explain_project_button)
         open_doc = button("Open Markdown…")
         open_doc.clicked.connect(self._choose_document)
         tools.addWidget(open_doc)
@@ -60,6 +70,9 @@ class GuidePage(ProjectPage):
             self.views[key] = view
             self.tabs.addTab(view, key)
         self.diagram = DiagramPanel()
+        self.diagram.load_graph = self._graph
+        self.diagram.explain_file = self._explain_file
+        self.diagram.explain_component = lambda group, done: self._explain_project(group, done)
         self.tabs.addTab(self.diagram, "Flowcharts")
         self.tabs.setUsesScrollButtons(True)
         self.file_map = QTableWidget(0, 2)
@@ -181,14 +194,147 @@ class GuidePage(ProjectPage):
                 "## No README found\nUse **Open Markdown…** to choose project documentation."
             )
 
-        def mapped(model: ProjectMap) -> None:
+        self.diagram._request()
+        self.host.refresh()
+
+    def _explain_file(self, path: str, done: Any) -> None:
+        svc = self.service
+        if svc is None:
+            return
+        try:
+            notice = svc.file_explanation_notice(path)
+        except UserError as exc:
+            self.status.setText(str(exc))
+            return
+        if (
+            QMessageBox.question(
+                self,
+                "Explain this file · privacy",
+                notice,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            != QMessageBox.StandardButton.Yes
+        ):
+            return
+        self.diagram.explain_button.setEnabled(False)
+        self.status.setText("Explaining this file…")
+
+        def ready(_text: str) -> None:
             if self.service is svc:
-                self.diagram.set_model(model)
+                self.status.setText("AI-written explanation cached for this file.")
+                done()
+
+        def failed(exc: Exception) -> None:
+            if self.service is svc:
+                self.status.setText(str(exc))
+                self.diagram.explain_button.setEnabled(True)
 
         self.host.runner.run(
-            lambda _emit: svc.project_map(), on_done=mapped, on_error=self.host.report_error
+            lambda emit: svc.explain_file(path, notify=emit),
+            on_done=ready,
+            on_error=failed,
+            on_progress=lambda text: self.status.setText(text) if self.service is svc else None,
         )
-        self.host.refresh()
+
+    def _explain_project(self, component: str | None = None, done: Any = None) -> None:
+        svc = self.service
+        if svc is None:
+            return
+        try:
+            notice = svc.project_explanation_notice(20, 40000)
+        except UserError as exc:
+            self.status.setText(str(exc))
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Explain component" if component is not None else "Explain project")
+        layout = QVBoxLayout(dialog)
+        privacy = label(notice, "Muted")
+        privacy.setWordWrap(True)
+        layout.addWidget(privacy)
+        form = QFormLayout()
+        requests = QSpinBox()
+        requests.setObjectName("ExplanationRequestBudget")
+        requests.setRange(1, 200)
+        requests.setValue(20)
+        tokens = QSpinBox()
+        tokens.setObjectName("ExplanationTokenBudget")
+        tokens.setRange(1000, 1000000)
+        tokens.setSingleStep(1000)
+        tokens.setValue(40000)
+        form.addRow("Maximum requests (files, retries and folder summaries)", requests)
+        form.addRow("Reserved tokens (estimated input + maximum output)", tokens)
+        layout.addLayout(form)
+
+        def update_notice() -> None:
+            privacy.setText(svc.project_explanation_notice(requests.value(), tokens.value()))
+
+        requests.valueChanged.connect(update_notice)
+        tokens.valueChanged.connect(update_notice)
+        note = label(
+            "Files run in importance order. Cached files cost no requests. "
+            "A rate limit stops the run; run this action again to resume.",
+            "Muted",
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        controls = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        controls.button(QDialogButtonBox.StandardButton.Ok).setText("Explain")
+        controls.accepted.connect(dialog.accept)
+        controls.rejected.connect(dialog.reject)
+        layout.addWidget(controls)
+        dialog.resize(640, 400)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            dialog.deleteLater()
+            return
+        budget_requests, budget_tokens = requests.value(), tokens.value()
+        dialog.deleteLater()
+        self.explain_project_button.setEnabled(False)
+        self.diagram.explain_button.setEnabled(False)
+        self.status.setText(
+            f"Explaining • budget {budget_requests} requests / {budget_tokens:,} reserved tokens"
+        )
+
+        def ready(report: str) -> None:
+            self.explain_project_button.setEnabled(True)
+            if self.service is svc:
+                self.status.setText(report)
+                (done or self.diagram._request)()
+
+        def failed(exc: Exception) -> None:
+            self.explain_project_button.setEnabled(True)
+            if self.service is svc:
+                self.status.setText(str(exc))
+                self.diagram.explain_button.setEnabled(True)
+
+        self.host.runner.run(
+            lambda emit: svc.explain_project(
+                max_requests=budget_requests,
+                token_budget=budget_tokens,
+                component=component,
+                notify=emit,
+            ),
+            on_done=ready,
+            on_error=failed,
+            on_progress=lambda text: self.status.setText(text) if self.service is svc else None,
+        )
+
+    def _graph(self, view: str, module: str | None, limit: int, done: Any) -> None:
+        svc = self.service
+        if svc is None:
+            return
+
+        def ready(data: dict[str, Any]) -> None:
+            if self.service is svc:
+                done(data)
+
+        self.host.runner.run(
+            lambda _emit: svc.project_graph(view, module=module, limit=limit),
+            on_done=ready,
+            on_error=self.host.report_error,
+        )
 
     def refresh(self, snap: Snapshot | None) -> None:
         root = str(self.service.root) if self.service else None
@@ -196,7 +342,7 @@ class GuidePage(ProjectPage):
             self._root = root
             self._document_path = None
             self._read_ticket += 1
-            self.diagram.set_model(ProjectMap({}, [], 0, 0, False))
+            self.diagram.clear()
             for view in self.views.values():
                 view.clear()
             self.status.setText("Click Refresh guide to read this project's documentation.")

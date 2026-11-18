@@ -23,7 +23,7 @@ from pathlib import Path
 
 class BlockFrontend(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        frontend = fullname.split('.')[0] in {'PySide6', 'typer', 'rich'}
+        frontend = fullname.split('.')[0] in {'PySide6', 'typer', 'rich', 'fastapi', 'uvicorn'}
         if frontend or fullname.startswith(('contextbridge.gui', 'contextbridge.cli')):
             raise ImportError('Frontend import blocked: ' + fullname)
 
@@ -38,6 +38,7 @@ snapshot = service.snapshot()
 assert 'Use SQLite' in service.prepare_handoff('claude', 'generic').handoff.payload
 assert service.guide_content(snapshot).progress
 assert service.project_map() is not None
+assert service.project_graph()["view"] == "overview"
 assert 'hello' in ChatService.prepare('hello', 'continue', '').text
 """
     env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1]))

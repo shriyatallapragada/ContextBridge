@@ -21,7 +21,9 @@ DEFAULT_ENDPOINTS = {
 }
 
 
-def create_provider(config: Config, provider: str | None = None) -> Provider:
+def create_provider(
+    config: Config, provider: str | None = None, *, read_credentials: bool = True
+) -> Provider:
     cfg = config.llm
     name = provider or cfg.provider
     if name == "none":
@@ -31,7 +33,11 @@ def create_provider(config: Config, provider: str | None = None) -> Provider:
             cfg.model, cfg.ollama_host, cfg.timeout_seconds, num_ctx=cfg.num_ctx, provider="ollama"
         )
     endpoint = DEFAULT_ENDPOINTS.get(name, cfg.base_url)
-    key = credentials.get_key(endpoint) or os.environ.get(API_KEY_ENV.get(name, "CB_API_KEY"), "")
+    key = (
+        (credentials.get_key(endpoint) or os.environ.get(API_KEY_ENV.get(name, "CB_API_KEY"), ""))
+        if read_credentials
+        else ""
+    )
     model = cfg.cloud_model_for(name) if name in DEFAULT_ENDPOINTS else cfg.model
     return HTTPProvider(model, endpoint, cfg.timeout_seconds, api_key=key, provider=name)
 
