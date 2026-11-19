@@ -11,6 +11,7 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
+from contextbridge import clipboard
 from contextbridge.cli.common import console, err_console, error_boundary, log, open_workspace
 from contextbridge.errors import UserError
 from contextbridge.service import ProjectService
@@ -50,7 +51,9 @@ def handoff_command(
         None, "--from", help="Agent you are leaving (any name; used as a label)."
     ),
     to_agent: str | None = typer.Option(
-        None, "--to", help="Agent to hand off to: claude, cursor, generic (or an alias)."
+        None,
+        "--to",
+        help="Agent to hand off to: claude, codex, cursor, kiro, generic (or an alias).",
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Build and show the payload without writing anything."
@@ -58,18 +61,23 @@ def handoff_command(
     no_llm: bool = typer.Option(
         False, "--no-llm", help="Skip LLMs and use the deterministic summary."
     ),
+    polish: bool = typer.Option(
+        False, "--polish", help="Explicitly send handoff wording to the model."
+    ),
     print_only: bool = typer.Option(
         False, "--print", help="Print the raw payload to stdout (messages go to stderr)."
     ),
+    budget: int | None = typer.Option(None, "--budget", min=120, help="Maximum output tokens."),
+    copy: bool = typer.Option(False, "--copy", help="Copy the handoff to the clipboard."),
     force: bool = typer.Option(
         False, "--force", help="Overwrite a HANDOFF.md / handoff.mdc not created by ContextBridge."
     ),
 ) -> None:
     """Hand the current session off to another agent."""
     with error_boundary():
-        if not dry_run and (not from_agent or not to_agent):
+        if not dry_run and not to_agent and not copy:
             raise UserError(
-                "`cb handoff` needs both --from and --to.",
+                "Choose --to, --copy, or --dry-run.",
                 hint="Example: cb handoff --from claude --to cursor  (add --dry-run to preview).",
             )
         ws = open_workspace(ctx)
@@ -79,16 +87,26 @@ def handoff_command(
             err_console.print(f"[yellow]cb:[/] {escape(message)}")
 
         prepared = service.prepare_handoff(
-            from_agent, to_agent, use_llm=not no_llm, force=force, notify=notify
+            from_agent,
+            to_agent,
+            use_llm=False if no_llm else True if polish else None,
+            budget=budget,
+            force=force,
+            notify=notify,
         )
         handoff, adapter = prepared.handoff, prepared.adapter
-        cap = ws.load_config().handoff.hard_cap_tokens
+        cap = budget or min(
+            ws.load_config().handoff.target_tokens, ws.load_config().handoff.hard_cap_tokens
+        )
         target = adapter.relative_path if adapter else None
         out = err_console if print_only else console
 
-        if dry_run:
+        if copy:
+            clipboard.copy_text(handoff.payload)
+            err_console.print("Copied handoff to clipboard.")
+        if dry_run or not to_agent:
             log.info(
-                "handoff --dry-run: method=%s raw=%d compressed=%d",
+                "handoff preview: method=%s raw=%d compressed=%d",
                 handoff.method,
                 handoff.raw_tokens,
                 handoff.compressed_tokens,
@@ -99,7 +117,11 @@ def handoff_command(
                 console.print(
                     Panel(
                         escape(handoff.payload.rstrip()),
-                        title="Handoff payload (dry run, nothing written)",
+                        title=(
+                            "Copied handoff"
+                            if copy
+                            else "Handoff payload (dry run, nothing written)"
+                        ),
                         border_style="blue",
                     )
                 )

@@ -216,6 +216,23 @@ QRadioButton::indicator {{
 QRadioButton::indicator:checked {{ border-color: {PRIMARY}; {radio_img} }}
 QCheckBox:focus, QRadioButton:focus {{ color: {TEXT}; }}
 
+/* ---- project guide: explicit contrast, no platform-dependent tabs ---- */
+QPushButton#GuideSection {{
+    color: #352727; background: #FFFFFF; border: 1px solid #A08C7E;
+    border-radius: 9px; font-size: 12pt; font-weight: 600; padding: 10px 8px;
+    min-height: 26px;
+}}
+QPushButton#GuideSection:hover {{ background: #EFE4D9; border-color: #632626; }}
+QPushButton#GuideSection:checked {{
+    background: #632626; color: #FFFFFF; border: 2px solid #632626;
+}}
+QPushButton#GuideSection:focus {{ border: 2px solid #174E78; }}
+QTabWidget#GuideContent::pane {{ border: none; background: #FFFFFF; }}
+QTabBar::tab {{ background: #FFFFFF; color: #352727; padding: 10px 14px; border: 1px solid #A08C7E; }}
+QTabBar::tab:selected {{ background: #632626; color: #FFFFFF; }}
+QTableWidget {{ background: #FFFFFF; alternate-background-color: #F6F0E8; color: #352727; gridline-color: #D5C9BC; }}
+QHeaderView::section {{ background: #632626; color: #FFFFFF; padding: 10px; border: none; font-weight: 600; }}
+
 /* ---- misc ---- */
 QScrollBar:vertical {{ background: transparent; width: 12px; margin: 2px; }}
 QScrollBar::handle:vertical {{ background: {BORDER}; border-radius: 5px; min-height: 36px; }}

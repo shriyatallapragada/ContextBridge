@@ -1,0 +1,7 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>ContextBridge Chat Export</title>
+<style>body{font:14px system-ui;width:360px;padding:14px}textarea{width:100%;height:220px;box-sizing:border-box}button{padding:8px;margin:8px 0}p{line-height:1.4}</style>
+</head><body><h2>Export a chat excerpt</h2><p>Select the messages you want on the page, then capture them. Only selected text is read. Nothing is uploaded.</p>
+<button id="capture">Capture selected text</button><textarea id="preview" aria-label="Review selected chat text" maxlength="100000"></textarea>
+<p>Review for private details before saving. Open the saved text in ContextBridge → Chat bridge. This export is not automatically redacted.</p>
+<button id="save" disabled>Save text file</button><p id="status" role="status"></p><script src="popup.js"></script></body></html>

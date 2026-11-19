@@ -26,13 +26,17 @@ from contextbridge.errors import ContextBridgeError
 from contextbridge.gui import assets, theme
 from contextbridge.gui.pages.base import ProjectPage
 from contextbridge.gui.pages.changes import ChangesPage
+from contextbridge.gui.pages.chat import ChatPage
+from contextbridge.gui.pages.guide import GuidePage
 from contextbridge.gui.pages.handoff import HandoffPage
 from contextbridge.gui.pages.home import HomePage
 from contextbridge.gui.pages.notes import NotesPage
 from contextbridge.gui.pages.settings import SettingsPage
+from contextbridge.gui.pages.setup import SetupPage
 from contextbridge.gui.pages.welcome import WelcomePage
 from contextbridge.gui.widgets import Toast, add_shortcut, button, label
 from contextbridge.gui.workers import TaskRunner
+from contextbridge.providers.settings import ProviderSettingsService
 from contextbridge.service import ProjectService, Snapshot, git_is_installed
 
 log = logging.getLogger("contextbridge")
@@ -43,6 +47,8 @@ NAV: tuple[tuple[str, str], ...] = (
     ("changes", "Changes"),
     ("handoff", "Hand off"),
     ("settings", "Settings"),
+    ("guide", "Project guide"),
+    ("chat", "Chat bridge"),
 )
 MAX_RECENTS = 6
 WELCOME_INDEX, SHELL_INDEX = 0, 1
@@ -72,6 +78,8 @@ class MainWindow(QMainWindow):
         self.welcome = WelcomePage(self)
         self.root.addWidget(self.welcome)
         self.root.addWidget(self._build_shell())
+        self.setup_page = SetupPage(self, self._finish_provider_setup)
+        self.root.addWidget(self.setup_page)
         self.toast_widget = Toast(self.root)
 
         self._shortcuts()
@@ -82,10 +90,15 @@ class MainWindow(QMainWindow):
             on_error=lambda _exc: None,
         )
         self.root.setCurrentIndex(WELCOME_INDEX)
-        if restore_last:
+        if not ProviderSettingsService().load().llm.setup_complete:
+            self.root.setCurrentWidget(self.setup_page)
+        elif restore_last:
             last = str(self.settings.value("lastProject", "") or "")
             if last and Path(last).is_dir():
                 self.open_project(last)
+
+    def _finish_provider_setup(self) -> None:
+        self.root.setCurrentIndex(WELCOME_INDEX)
 
     # ----- building the window ------------------------------------------------------------------
 
@@ -102,6 +115,8 @@ class MainWindow(QMainWindow):
             "changes": ChangesPage(self),
             "handoff": HandoffPage(self),
             "settings": SettingsPage(self),
+            "guide": GuidePage(self),
+            "chat": ChatPage(self),
         }
         for key, _text in NAV:
             self.pages.addWidget(self.page_map[key])
@@ -176,8 +191,14 @@ class MainWindow(QMainWindow):
     def go(self, key: str) -> None:
         if key not in self.page_map:
             return
+        if key == "chat":
+            self.root.setCurrentIndex(SHELL_INDEX)
         self.nav_buttons[key].setChecked(True)
         self.pages.setCurrentWidget(self.page_map[key])
+        if key == "guide" and self.service is not None:
+            guide = self.page_map[key]
+            if isinstance(guide, GuidePage) and guide._document_path is None:
+                guide._load()
 
     def choose_project(self) -> None:
         start = str(self.service.root.parent) if self.service else str(Path.home())

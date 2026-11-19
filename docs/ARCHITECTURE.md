@@ -25,14 +25,17 @@ The whole thing is about 5,400 lines of Python in `contextbridge/`, covered by 3
 
 | Package | Files | Role |
 |---|---|---|
-| `main.py`, `cli/` | `init_cmd`, `log_cmd`, `run_cmd`, `hook_cmd`, `status_cmd`, `handoff_cmd`, `search_cmd`, `clear_cmd`, `common` | The Typer commands. Thin: they parse options and call into the layers below |
-| `core/` | `git_observer`, `ast_parser`, `shell_listener`, `sanitizer` | Reading the outside world (git, source code, command output) and scrubbing secrets |
+| `main.py`, `cli/` | `init_cmd`, `log_cmd`, `run_cmd`, `hook_cmd`, `status_cmd`, `handoff_cmd`, `search_cmd`, `clear_cmd`, `serve_cmd`, `mcp_cmd`, `common` | The Typer commands. Thin: they parse options and call into the layers below |
+| `core/` | `git_observer`, `git_history`, `transcript_tasks`, `ast_parser`, `shell_listener`, `sanitizer` | Reading the outside world (git, source code, command output, pasted transcripts) and scrubbing secrets |
 | `storage/` | `db`, `workspace`, `vector_store` | SQLite schema, the `.context/` folder, `state.json`, session logic, optional Chroma index |
 | `synthesis/` | `token_counter`, `context_builder`, `llm_client`, `compressor` | Turning stored data into a budgeted handoff payload |
 | `adapters/` | `base_adapter`, `claude_adapter`, `cursor_adapter`, `generic_adapter`, `registry` | Writing the payload into agent files, and removing it again |
+| `dashboard.py` | | Deterministic dashboard operations (North Star, tasks, momentum) shared by the API and the MCP server |
+| `local_api.py`, `mcp_server.py` | | The FastAPI loopback server and the stdio MCP server. Front ends only: they import the engine, never the reverse |
+| `frontend/` | Vite + React + Tailwind + React Flow | The web dashboard; built to `frontend/dist` and served at `/ui` |
 | `config.py`, `errors.py` | | Layered configuration, and exceptions that carry exit codes |
 
-**Dependencies run one way**: `cli` -> `synthesis`/`adapters` -> `storage`/`core` -> `sanitizer`. The one slight exception is that `git_observer` imports the marker constants from `adapters`, so it can ignore injected content.
+**Dependencies run one way**: `cli`/`local_api`/`mcp_server` -> `dashboard` -> `synthesis`/`adapters` -> `storage`/`core` -> `sanitizer`. The one slight exception is that `git_observer` imports the marker constants from `adapters`, so it can ignore injected content.
 
 ---
 
@@ -296,30 +299,31 @@ The spec didn't place `bug` and `todo`, so those two slots are a design choice.
 
 **Two token numbers, deliberately separate.** `raw_tokens` is the size of the *full* context before any truncation: what the next agent would otherwise need. The model's input is then capped at `max_input_tokens` (12000) by `fit_items`. That function keeps whole items in priority order, truncates the first one that doesn't fit (if more than 40 tokens remain), and drops the rest. Compression ratio is always computed against the true raw size.
 
-### The LLM client (`synthesis/llm_client.py`)
+### Optional providers (`providers/`)
 
-Routing:
+The shared `generate(prompt, schema=None)` interface has offline (`none`), loopback
+Ollama, and OpenAI-compatible HTTP implementations. The default is `none`, which makes
+no requests. `synthesis/llm_client.py` preserves the previous client imports. Explicit
+legacy Groq/OpenAI choices and the old hosted-fallback opt-in remain supported.
 
-```
-provider = ollama      -> Ollama, then (if cloud_fallback and the key is set) Groq/OpenAI
-provider = groq|openai -> that provider (if its key is set)
-provider = none, or --no-llm -> no clients
-```
+Ollama requests set `options.num_ctx` explicitly. Both HTTP transports bound time and
+response size, disable inherited proxies and redirects, sanitize prompts, and report
+safe errors without response bodies or credentials. Structured responses are validated
+against the supplied JSON schema. No model SDK is required.
 
-Ollama errors map to three kinds: **unavailable** (connection refused, model missing with an `ollama pull` hint), **timeout**, and **other**. Cloud clients use `max_retries=0` and your timeout, and `llm.cloud_model` overrides the default per-provider model, since the Ollama model name isn't valid for Groq or OpenAI. All calls use temperature 0.2.
+`ProviderSettingsService` is shared by the CLI and GUI. Config stores provider metadata;
+API credentials go to a secure OS-keyring backend scoped to the endpoint. A failed
+credential save has no plaintext fallback. The first-run screen and project Settings
+use the same form. Connection checks are explicit actions and send no project context.
 
 ### The compressor (`synthesis/compressor.py`)
 
-For each candidate client, in order:
-
-1. **Notice.** If it's a cloud client, print a one-line notice saying sanitized context is being sent, and why.
-2. **Re-sanitize** the prompt text just before it leaves the process, as defense in depth.
-3. **Ask** using your configured system prompt (the spec's default: "senior systems architect creating an emergency session handoff...") plus the context.
-4. **Clean the output** by stripping `<think>...</think>`, wrapping code fences, and chatty openers ("Here is the summary:").
-5. **Validate length.** Within budget: accept. Over: **retry once** with a stricter instruction (75% of target), then **truncate line by line** with a note if still over.
-6. Any provider error moves to the next candidate. Even an unexpected exception from an SDK is caught.
-
-If nothing works, the **deterministic fallback** runs. It can't fail and needs nothing external. It fills a fixed template (Goal/Branch, Done, Files & symbols, Decisions, Failing tests, Blockers, Next steps). When over budget it repeatedly deletes the lowest-priority, latest-in-document line until it fits.
+The engine renders a deterministic document first, reserving essential sections before
+file details. An optional model can only polish whitespace and final punctuation.
+Validation preserves factual words, paths, counts, order and section membership, then
+checks the token budget. Invalid rewrites retry once. Transport errors, invalid schema
+responses and rejected factual changes retain the deterministic result. Hosted calls
+notify the caller before sending sanitized wording.
 
 ### The payload
 
@@ -353,7 +357,9 @@ All adapters share one idea: ContextBridge owns **only the text between two mark
 | Adapter (`--to`) | Writes | Details |
 |---|---|---|
 | `claude`, alias `claude-code` | `CLAUDE.md` | Wraps the payload in `<context_handoff>...</context_handoff>` inside the markers and appends it after your content. Cleanup deletes the file only if it's left empty, meaning ContextBridge created it |
+| `codex` | `AGENTS.md` | Appends/replaces only the marked handoff block; preserves other instructions |
 | `cursor` | `.cursor/rules/handoff.mdc` | YAML frontmatter (`description`, `alwaysApply: true`) **outside** the markers, since Cursor requires it first in the file. Cleanup deletes the file and then any now-empty `.cursor/rules` and `.cursor` directories |
+| `kiro` | `AGENTS.md` | Shares Codex's instruction file and marked block; preserves other instructions |
 | `generic`, aliases `aider`, `opencode` | `HANDOFF.md` | The marker block is the whole file |
 
 ### Guarantees (all tested)
@@ -478,7 +484,7 @@ $ cb clear --cleanup-adapters              -> CLAUDE.md is byte-identical to bef
 - **Symbol mapping is syntactic.** It doesn't resolve references, so a changed constant that affects ten functions registers only where it was edited. Languages outside the six get only the hunk-header fallback, which is approximate.
 - **Per-commit attribution.** Merge commits record the first-parent diff, and commits made during a rebase are picked up late, on the next commit.
 - **`handed_off` is defined but unused.** Sessions stay active after a handoff, on purpose.
-- **Roadmap features aren't built**: the MCP server, more agent adapters, auto-trigger on rate limits, and encrypted export.
+- **Roadmap features aren't built**: more agent adapters, auto-trigger on rate limits, and encrypted export. (The MCP server shipped in v0.2.0 — see section 19.)
 
 ---
 
@@ -492,7 +498,7 @@ It lives in `contextbridge/gui/` and is deliberately thin.
   data, never prints, and never imports Qt or Typer. The CLI commands call it too, so the two
   front ends can't drift apart. A handoff is **prepared** (built, nothing written) and then
   **committed** (written and recorded), so what you preview is exactly what is written.
-- **Screens** (`gui/pages/`): Home, Notes, Changes, Hand off, Settings, plus a Welcome screen.
+- **Screens** (`gui/pages/`): Home, Notes, Changes, Hand off, Settings, Guide, Welcome and first-run Setup.
   Each is built from the small widgets in `widgets.py`. User-facing wording ("notes",
   "words", "functions") lives in `wording.py`, so the technical terms never leak.
 - **Never freezes**: git, tests and AI calls run on a thread pool (`workers.py`). Results come
@@ -506,5 +512,53 @@ It lives in `contextbridge/gui/` and is deliberately thin.
   app. In a packaged app `sys.executable` is the app, not Python, so the git hook runs it as
   `<app> --cli hook post-commit`. That mode behaves like `cb` and never opens a window
   (`docs/PACKAGING.md`).
-- **Choices**: AI is "Smart" (use Ollama if running, else a template) or "Template only".
-  Cloud providers stay command-line only, so no API key is ever typed into or stored by the app.
+- **Choices**: offline, local Ollama or an API endpoint. API key inputs are masked and
+  saved through the OS keyring. Offline mode is the default and needs no model.
+
+---
+
+## 19. The v0.2.0 dashboard, API and MCP server
+
+Three front ends over one deterministic state store. Nothing here calls a model.
+
+**Storage (migration v7).** `project_intent` holds a single row (`id = 1`) with the
+persistent North Star text; `git_history` holds the parsed momentum window; `decision_logs`
+gained a `source` column (`manual`, `chat`, `mcp`, ...) so a task knows where it came from.
+To-dos remain `decision_logs` rows with `tag='todo'` — `cb todo list` and the handoff's
+"Next steps" already read them, so the dashboard adds no second source of truth.
+
+**`core/git_history.py`.** On server boot, and on demand with `?refresh=true`, it runs
+`git log --max-count=15 --format=%H%x1f%h%x1f%an%x1f%cI%x1f%s%x1f%P%x1e` and one
+`git diff --stat <parent> <sha>` per commit (the empty-tree hash stands in for a root
+commit's parent). Output is parsed by pure functions, dates are normalised to UTC, and the
+window is stored wholesale, so the stored timeline always equals what git would report.
+A repository with no commits, no git, or a failing command yields an empty window rather
+than an error.
+
+**`core/transcript_tasks.py`.** Chat Bridge import with three fixed rules in order —
+markdown checkboxes (with their checked state), `TODO:`/`ACTION:`/`NEXT:` marker lines, and
+bullets under a *Next steps* / *Action items* heading. Code fences are skipped, results are
+deduplicated, sanitized and capped at 100 tasks. The same transcript always yields the same
+tasks, each carrying its source line number.
+
+**`dashboard.py`.** The one writer/reader for intent, tasks and momentum. `local_api.py`
+and `mcp_server.py` are both thin adapters over it, which is why the REST API and the MCP
+tools can't disagree.
+
+**`local_api.py`.** Existing bearer-token middleware, plus `/v1/dashboard`, `/v1/intent`,
+`/v1/tasks`, `/v1/commits`, `/v1/chat-import`, and a static mount at `/ui` serving
+`frontend/dist`. The `/ui` shell is the only unauthenticated path (it contains no project
+data); CORS is added last so the Vite dev server on 5173 can preflight, while every real
+request still carries the token. `cb serve` prints the dashboard URL with the token in the
+fragment — browsers never send fragments to a server.
+
+**`mcp_server.py`.** The official `mcp` Python SDK over stdio (`cb mcp`), exposing
+`get_project_status`, `log_decision_or_todo`, `set_project_intent`, `list_tasks`,
+`get_git_history` and `get_architecture_graph`. The project directory comes from the
+`project_dir` argument, `CB_PROJECT_DIR`, or the working directory, in that order.
+
+**`frontend/`.** Vite + React + Tailwind + React Flow. Three tabs — Overview & Timeline
+(North Star, momentum cards, commit timeline), To-Do & Tasks (checklist plus the Chat
+Bridge import box) and Architecture Map (React Flow over `GET /v1/graph`, with a Mermaid
+copy button). It holds no parsing logic: transcripts, git and AST work all happen on the
+Python side, so the browser spends no tokens either.

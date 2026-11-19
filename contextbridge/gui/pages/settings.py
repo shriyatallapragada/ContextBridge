@@ -5,12 +5,8 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QButtonGroup,
     QCheckBox,
-    QHBoxLayout,
-    QLineEdit,
     QMessageBox,
-    QRadioButton,
     QVBoxLayout,
     QWidget,
 )
@@ -19,8 +15,8 @@ from contextbridge import __version__
 from contextbridge.core.git_observer import HookAction
 from contextbridge.gui import wording
 from contextbridge.gui.pages.base import Host, ProjectPage
-from contextbridge.gui.widgets import Card, Notice, button, label
-from contextbridge.service import AISettings, OllamaCheck, Snapshot, check_ollama
+from contextbridge.gui.widgets import Card, button, label
+from contextbridge.service import Snapshot
 
 
 class SettingsPage(ProjectPage):
@@ -29,47 +25,15 @@ class SettingsPage(ProjectPage):
         self.heading("Settings", "Settings", "Everything here is optional. The defaults work well.")
         self._loading = False
 
-        # ----- AI -------------------------------------------------------------------------------
         self.ai_card = Card()
-        self.ai_card.body.addWidget(label("AI SUMMARIES", "Eyebrow"))
-        self.ai_card.body.addWidget(label("How should your summary be written?", "H2"))
-        self.local_radio = QRadioButton("Smart (recommended)")
-        self.off_radio = QRadioButton("Simple template only")
-        self.ai_group = QButtonGroup(self)
-        self.ai_group.addButton(self.local_radio)
-        self.ai_group.addButton(self.off_radio)
-        self.local_radio.toggled.connect(self._ai_changed)
-        self.ai_hint_smart = label(
-            "Uses the free Ollama app on this computer when it's running, and a simple template when it isn't. "
-            "Nothing ever leaves your computer.",
-            "Small",
+        self.ai_card.body.addWidget(label("OPTIONAL MODEL", "Eyebrow"))
+        from contextbridge.gui.provider_form import ProviderForm
+        from contextbridge.providers.settings import ProviderSettingsService
+
+        self.provider_form = ProviderForm(
+            host.runner, ProviderSettingsService(), lambda: self.host.toast("Saved.")
         )
-        self.ai_hint_off = label("Always instant and private. Never uses an AI.", "Small")
-        self.ai_card.body.addWidget(self.local_radio)
-        self.ai_card.body.addWidget(self.ai_hint_smart)
-        self.model_row = QWidget()
-        mrow = QHBoxLayout(self.model_row)
-        mrow.setContentsMargins(0, 4, 0, 0)
-        self.model_edit = QLineEdit()
-        self.model_edit.setPlaceholderText("Model name, for example qwen2.5-coder:7b")
-        self.model_edit.setAccessibleName("AI model name")
-        self.model_edit.editingFinished.connect(self._ai_changed)
-        self.check_button = button("Check connection")
-        self.check_button.clicked.connect(self._check_ai)
-        mrow.addWidget(self.model_edit, 1)
-        mrow.addWidget(self.check_button)
-        self.ai_card.body.addWidget(self.model_row)
-        self.ai_message = Notice("")
-        self.ai_message.hide()
-        self.ai_card.body.addWidget(self.ai_message)
-        self.ai_card.body.addSpacing(6)
-        self.ai_card.body.addWidget(self.off_radio)
-        self.ai_card.body.addWidget(self.ai_hint_off)
-        self.cloud_notice = Notice(
-            "A cloud AI is set up for this project through the command line. The app doesn't change it."
-        )
-        self.cloud_notice.hide()
-        self.ai_card.body.addWidget(self.cloud_notice)
+        self.ai_card.body.addWidget(self.provider_form)
         self.body.addWidget(self.ai_card)
 
         # ----- commits -----------------------------------------------------------------------------
@@ -153,15 +117,10 @@ class SettingsPage(ProjectPage):
             return
         self._loading = True
         try:
-            ai: AISettings = svc.load_ai_settings()
-            cloud = ai.mode == "cloud"
-            for widget in (self.local_radio, self.off_radio, self.ai_hint_smart, self.ai_hint_off):
-                widget.setVisible(not cloud)
-            self.off_radio.setChecked(ai.mode == "off")
-            self.local_radio.setChecked(ai.mode == "local")
-            self.model_edit.setText(ai.model)
-            self.model_row.setVisible(ai.mode == "local")
-            self.cloud_notice.setVisible(cloud)
+            from contextbridge.providers.settings import ProviderSettingsService
+
+            self.provider_form.service = ProviderSettingsService(svc.ws.context_dir)
+            self.provider_form.reload()
             is_repo = svc.is_git_repo()
             self.hook_checkbox.setEnabled(is_repo)
             self.hook_checkbox.setChecked(is_repo and svc.hook_installed())
@@ -172,44 +131,6 @@ class SettingsPage(ProjectPage):
             )
         finally:
             self._loading = False
-
-    # ----- AI ------------------------------------------------------------------------------------------
-
-    def _ai_changed(self, *_args: object) -> None:
-        svc = self.service
-        if self._loading or svc is None:
-            return
-        local = self.local_radio.isChecked()
-        self.model_row.setVisible(local)
-        model = self.model_edit.text().strip()
-
-        def work(_emit: object) -> None:
-            svc.save_ai_settings("local" if local else "off", model or None)
-
-        def done(_result: object) -> None:
-            self.host.toast("Saved.")
-
-        self.host.runner.run(work, on_done=done, on_error=self.host.report_error)
-
-    def _check_ai(self) -> None:
-        svc = self.service
-        if svc is None:
-            return
-        model = self.model_edit.text().strip() or svc.load_ai_settings().model
-        host_url = svc.load_ai_settings().host
-        self.check_button.setEnabled(False)
-        self.check_button.setText("Checking…")
-
-        def work(_emit: object) -> OllamaCheck:
-            return check_ollama(host_url, model)
-
-        def done(result: OllamaCheck) -> None:
-            self.check_button.setEnabled(True)
-            self.check_button.setText("Check connection")
-            self.ai_message.set_text(("✓  " if result.ok else "") + result.message)
-            self.ai_message.show()
-
-        self.host.runner.run(work, on_done=done, on_error=self.host.report_error)
 
     # ----- commits -----------------------------------------------------------------------------------------
 

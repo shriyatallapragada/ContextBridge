@@ -1,4 +1,4 @@
-"""`cb init`: create `.context/`, the database, state and config; start a session."""
+"""`cb init`: create `.contextbridge/`, the database, state and config; start a session."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import typer
 from rich.markup import escape
 
 from contextbridge.cli.common import app_context, console, error_boundary, log
-from contextbridge.core.git_observer import GitObserver, HookAction, HookResult
+from contextbridge.core.git_observer import HookAction, HookResult
 from contextbridge.errors import NotAGitRepoError
 from contextbridge.service import ProjectService
 from contextbridge.storage.workspace import find_project_root
@@ -40,11 +40,10 @@ def _report_install(result: HookResult) -> None:
 
 def _uninstall_hooks(root: Path) -> None:
     try:
-        observer = GitObserver.open(root)
+        result = ProjectService(root).uninstall_hook()
     except NotAGitRepoError:
         console.print("[dim]Not a git repository; no hooks to remove.[/]")
         return
-    result = observer.uninstall_hook()
     path = escape(str(result.path))
     if result.action == HookAction.not_installed:
         console.print(f"[dim]No ContextBridge hook found in {path}.[/]")
@@ -78,7 +77,7 @@ def init_command(
             f"[bold green]✓[/] {verb} ContextBridge in [cyan]{result.workspace.context_dir}[/]"
         )
         if result.gitignore_changed:
-            console.print("  • Added [cyan].context/[/] to .gitignore")
+            console.print("  • Added ContextBridge data folders to .gitignore")
         if result.migrations:
             console.print(f"  • Database schema at v{result.schema_version}")
         session_verb = "Started" if result.created_session else "Resumed"

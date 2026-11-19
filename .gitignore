@@ -11,3 +11,6 @@ htmlcov/
 .DS_Store
 build/
 packaging/icons/
+.contextbridge/
+node_modules/
+frontend/dist/

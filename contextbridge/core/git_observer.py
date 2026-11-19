@@ -31,7 +31,7 @@ MAX_SOURCE_BYTES = 1_000_000
 
 # Files ContextBridge writes whole. Never part of a session's changes, otherwise each
 # handoff would contain the previous one.
-INJECTED_FILES = ("HANDOFF.md", ".cursor/rules/handoff.mdc")
+INJECTED_FILES = ("AGENTS.md", "HANDOFF.md", ".cursor/rules/handoff.mdc")
 # Files that may carry an injected block among the user's own content.
 SHARED_INJECTED_NAME = "CLAUDE.md"
 
@@ -90,6 +90,16 @@ class CommitInfo:
 
 
 @dataclass(frozen=True)
+class WorkingChange:
+    """One uncommitted working-tree path with its state and line counts."""
+
+    path: str
+    status: str  # "untracked" | "staged" | "unstaged" | "staged+unstaged"
+    insertions: int
+    deletions: int
+
+
+@dataclass(frozen=True)
 class FileDiff:
     path: str
     change_type: ChangeType
@@ -108,6 +118,17 @@ class SkippedFile:
 class DiffResult:
     files: list[FileDiff] = field(default_factory=list)
     skipped: list[SkippedFile] = field(default_factory=list)
+
+
+def _untracked_line_count(path: Path) -> int:
+    """Lines of a new, not-yet-added text file; 0 for missing, huge or binary files."""
+    try:
+        if not path.is_file() or path.stat().st_size > MAX_SOURCE_BYTES:
+            return 0
+        data = path.read_bytes()
+    except OSError:
+        return 0
+    return 0 if b"\0" in data[:8192] else data.count(b"\n")
 
 
 class HookAction(StrEnum):
@@ -446,6 +467,45 @@ class GitObserver:
             max_files=max_files,
         )
 
+    def numeric_changes(self, base: str, target: str) -> list[FileDiff]:
+        """Collect paths, kinds and line counts without requesting any patch bodies."""
+        stats: dict[str, str] = {}
+        output = self.git(
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--numstat",
+            "-z",
+            base,
+            target,
+        )
+        for item in output.split("\0"):
+            if not item:
+                continue
+            added, removed, path = item.split("\t", 2)
+            stats[path] = (
+                "binary file changed" if added == "-" else f"+{int(added)} / -{int(removed)} lines"
+            )
+        fields = iter(
+            self.git(
+                "diff", "--no-ext-diff", "--no-textconv", "-M", "--name-status", "-z", base, target
+            ).split("\0")
+        )
+        changes = []
+        for code in fields:
+            if not code:
+                continue
+            path = next(fields)
+            old_path = None
+            if code[0] in "RC":
+                old_path, path = path, next(fields)
+            kind = {"A": ChangeType.added, "D": ChangeType.deleted, "R": ChangeType.renamed}.get(
+                code[0], ChangeType.modified
+            )
+            changes.append(FileDiff(path, kind, old_path, snippet=stats.get(path, "path changed")))
+        return changes
+
     def diff(
         self,
         base: str,
@@ -591,6 +651,68 @@ class GitObserver:
                 )
             )
         return result
+
+    def working_changes(self, *, ignore_globs: list[str] | None = None) -> list[WorkingChange]:
+        """Uncommitted working-tree changes with line counts (no commits, no patches).
+
+        Staged and unstaged counts come from ``git diff --numstat``; untracked files
+        count their own lines. Sensitive, ignored and injected files are left out.
+        """
+        globs = ignore_globs or []
+        tree = self.status()
+        flags: dict[str, set[str]] = {}
+        for path in tree.untracked:
+            flags.setdefault(path, set()).add("untracked")
+        for path in tree.staged:
+            flags.setdefault(path, set()).add("staged")
+        for path in tree.unstaged:
+            flags.setdefault(path, set()).add("unstaged")
+        counts: dict[str, tuple[int, int]] = {}
+        staged_paths: set[str] = set()
+        unstaged_paths: set[str] = set()
+        for cached in (False, True):
+            out = self.git(
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                "--numstat",
+                "-z",
+                *(("--cached",) if cached else ()),
+                check=False,
+            )
+            destination = staged_paths if cached else unstaged_paths
+            for item in out.split("\0"):
+                if not item:
+                    continue
+                fields = item.split("\t")
+                if len(fields) != 3 or not fields[2]:
+                    continue
+                added, removed, path = fields
+                destination.add(path)
+                insertions, deletions = counts.get(path, (0, 0))
+                counts[path] = (
+                    insertions + (int(added) if added.isdigit() else 0),
+                    deletions + (int(removed) if removed.isdigit() else 0),
+                )
+        changes: list[WorkingChange] = []
+        for path in sorted(set(flags) | staged_paths | unstaged_paths):
+            if is_sensitive_file(path) or matches_ignore(path, globs) or path in INJECTED_FILES:
+                continue
+            marks = flags.get(path) or ({"staged"} if path in staged_paths else {"unstaged"})
+            if "untracked" in marks:
+                status = "untracked"
+            elif {"staged", "unstaged"} <= marks:
+                status = "staged+unstaged"
+            elif "staged" in marks:
+                status = "staged"
+            else:
+                status = "unstaged"
+            insertions, deletions = counts.get(path, (0, 0))
+            if status == "untracked":
+                insertions += _untracked_line_count(self.root / path)
+            changes.append(WorkingChange(path, status, insertions, deletions))
+        return changes
 
     def file_at(self, rev: str | None, path: str) -> str | None:
         """File contents at ``rev`` (``None`` = working tree), or None if absent/too big."""

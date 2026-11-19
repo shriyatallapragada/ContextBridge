@@ -9,11 +9,11 @@ from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
-from contextbridge.cli.common import console, error_boundary, git_observer_for, open_workspace
+from contextbridge.cli.common import console, error_boundary, open_workspace
+from contextbridge.service import ProjectService
 from contextbridge.storage.db import DECISION_TAGS, parse_utc
 from contextbridge.synthesis.context_builder import (
     SessionContext,
-    build_context,
     describe_test_run,
     format_symbols,
 )
@@ -99,15 +99,11 @@ def status_command(ctx: typer.Context) -> None:
     with error_boundary():
         ws = open_workspace(ctx)
         config = ws.load_config()
-        state = ws.load_state()
-        with ws.open_db() as db:
-            session, _ = ws.active_session(db)
-            context = build_context(
-                db, session, config, project=state.project_name, observer=git_observer_for(ws)
-            )
+        snapshot = ProjectService(ws.root).snapshot()
+        context = snapshot.context
         console.print(
             Panel(
-                _summary(context, ws.load_state().last_handoff),
+                _summary(context, snapshot.last_handoff),
                 title="ContextBridge status",
                 border_style="blue",
             )

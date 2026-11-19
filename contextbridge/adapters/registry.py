@@ -6,14 +6,18 @@ from pathlib import Path
 
 from contextbridge.adapters.base_adapter import BaseAdapter
 from contextbridge.adapters.claude_adapter import ClaudeAdapter
+from contextbridge.adapters.codex_adapter import CodexAdapter
 from contextbridge.adapters.cursor_adapter import CursorAdapter
 from contextbridge.adapters.generic_adapter import GenericAdapter
+from contextbridge.adapters.kiro_adapter import KiroAdapter
 from contextbridge.errors import UnknownAgentError
 
 ADAPTERS: dict[str, type[BaseAdapter]] = {
     "claude": ClaudeAdapter,
+    "codex": CodexAdapter,
     "cursor": CursorAdapter,
     "generic": GenericAdapter,
+    "kiro": KiroAdapter,
 }
 # Agents without a dedicated adapter use the generic one.
 ALIASES: dict[str, str] = {

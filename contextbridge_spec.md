@@ -12,7 +12,7 @@ When developers switch AI coding agents or hit rate limits, conversation state i
 1. **Captures** git diffs, modified symbols (Tree-sitter), test/command results, and manual notes.
 2. **Stores** them locally: SQLite for structured data, ChromaDB for optional semantic search.
 3. **Compresses** raw context into a dense handoff of roughly 300-500 tokens, using a local LLM (Ollama) or an opt-in cloud API, with a deterministic no-LLM fallback.
-4. **Injects** the handoff into the target agent's context file (`.cursor/rules/handoff.mdc`, `CLAUDE.md`, `HANDOFF.md`).
+4. **Injects** the handoff into the target agent's context file (`.cursor/rules/handoff.mdc`, `CLAUDE.md`, `AGENTS.md`, `HANDOFF.md`).
 
 **Design principles**
 - **Local-first and private:** nothing leaves the machine unless the user explicitly enables a cloud provider.
@@ -81,6 +81,9 @@ contextbridge/
 │   │   └── token_counter.py  # tiktoken wrapper
 │   └── adapters/
 │       ├── base_adapter.py
+│       ├── agents_md_adapter.py
+│       ├── codex_adapter.py
+│       ├── kiro_adapter.py
 │       ├── cursor_adapter.py
 │       ├── claude_adapter.py
 │       ├── generic_adapter.py
@@ -279,7 +282,7 @@ class BaseAdapter(ABC):
 - **Claude Code:** upsert a `<context_handoff>...</context_handoff>` block in `CLAUDE.md` (create if missing; never touch other content). Cleanup removes only the block.
 - **Generic:** write `HANDOFF.md` at repo root (overwrite only if it carries the ContextBridge marker; otherwise ask or use `--force`).
 - Payload layout: header (from/to/timestamp/branch), the compressed summary, `active_files` list (top N by recent change), and a short "how to resume" line.
-- Registry resolves `claude`, `cursor`, `generic` (aliases: `claude-code`, `aider`, `opencode` map to generic unless a dedicated adapter exists). Unknown agent → clear error listing valid names.
+- Registry resolves `claude`, `codex`, `cursor`, `kiro`, `generic` (aliases include `claude-code`, `aider`, and `opencode`). Codex and Kiro share the root `AGENTS.md` instruction file. Unknown agent → clear error listing valid names.
 
 ---
 

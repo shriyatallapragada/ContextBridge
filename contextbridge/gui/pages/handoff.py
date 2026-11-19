@@ -7,6 +7,7 @@ from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
+    QGridLayout,
     QHBoxLayout,
     QMessageBox,
     QPlainTextEdit,
@@ -41,17 +42,17 @@ class HandoffPage(ProjectPage):
         self.step1.setObjectName("Page")
         step1_layout = self._column(self.step1)
         step1_layout.addWidget(label("1  ·  WHO'S TAKING OVER?", "Eyebrow"))
-        cards = QHBoxLayout()
+        cards = QGridLayout()
         cards.setSpacing(12)
         self.group = QButtonGroup(self)
         self.group.setExclusive(True)
         self.choice_cards: dict[str, ChoiceCard] = {}
-        for agent in wording.AGENTS:
+        for index, agent in enumerate(wording.AGENTS):
             card = ChoiceCard(agent.label, agent.blurb, agent.file)
             card.clicked.connect(self._choice_changed)
             self.group.addButton(card)
             self.choice_cards[agent.key] = card
-            cards.addWidget(card)
+            cards.addWidget(card, index // 3, index % 3)
         step1_layout.addLayout(cards)
         # --- step 2
         step1_layout.addSpacing(6)

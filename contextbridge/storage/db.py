@@ -15,10 +15,15 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from contextbridge.core.sanitizer import sanitize
 from contextbridge.errors import StorageError, UserError
+
+if TYPE_CHECKING:
+    from contextbridge.core.git_history import CommitRecord
+    from contextbridge.core.git_observer import FileDiff
+
 
 SESSION_STATUSES: Final = ("active", "archived", "handed_off")
 DECISION_TAGS: Final = ("note", "bug", "architecture", "blocker", "todo")
@@ -93,7 +98,78 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_changes_commit_file
 """
 
 # Index i holds the script that upgrades the schema from version i to i + 1.
-MIGRATIONS: Final[tuple[str, ...]] = (_MIGRATION_1, _MIGRATION_2)
+_MIGRATION_3: Final = """
+CREATE TABLE IF NOT EXISTS change_batches (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  timestamp TEXT NOT NULL,
+  duration_seconds REAL NOT NULL,
+  event_count INTEGER NOT NULL,
+  files TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  agent TEXT,
+  notes TEXT NOT NULL
+);
+"""
+_MIGRATION_4: Final = """
+CREATE TABLE file_summaries (
+  path TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  profile TEXT NOT NULL,
+  chunk_index INTEGER NOT NULL DEFAULT -1,
+  summary_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(path, content_hash, profile, chunk_index)
+);
+ALTER TABLE decision_logs ADD COLUMN status TEXT NOT NULL DEFAULT 'open';
+ALTER TABLE decision_logs ADD COLUMN superseded_by TEXT;
+"""
+_MIGRATION_5: Final = """
+CREATE TABLE file_explanations (
+ path TEXT NOT NULL, content_hash TEXT NOT NULL, profile TEXT NOT NULL,
+ explanation TEXT NOT NULL, mentioned_names TEXT NOT NULL, updated_at TEXT NOT NULL,
+ PRIMARY KEY(path, content_hash, profile)
+);
+CREATE TABLE provider_limits (profile TEXT PRIMARY KEY, state_json TEXT NOT NULL);
+"""
+_MIGRATION_6: Final = """
+CREATE TABLE component_explanations (
+ path TEXT NOT NULL, content_hash TEXT NOT NULL, profile TEXT NOT NULL,
+ summary_json TEXT NOT NULL, updated_at TEXT NOT NULL,
+ PRIMARY KEY(path, content_hash, profile)
+);
+"""
+# v7 (v0.2.0): the persistent North Star intent, the boot-time git momentum window,
+# and provenance for rows imported from a pasted chat transcript.
+_MIGRATION_7: Final = """
+CREATE TABLE project_intent (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),
+  north_star TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE git_history (
+  sha          TEXT PRIMARY KEY,
+  short_sha    TEXT NOT NULL,
+  author       TEXT NOT NULL,
+  committed_at TEXT NOT NULL,
+  subject      TEXT NOT NULL,
+  files        TEXT NOT NULL,
+  insertions   INTEGER NOT NULL DEFAULT 0,
+  deletions    INTEGER NOT NULL DEFAULT 0,
+  parsed_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_git_history_time ON git_history(committed_at);
+ALTER TABLE decision_logs ADD COLUMN source TEXT NOT NULL DEFAULT 'manual';
+"""
+MIGRATIONS: Final[tuple[str, ...]] = (
+    _MIGRATION_1,
+    _MIGRATION_2,
+    _MIGRATION_3,
+    _MIGRATION_4,
+    _MIGRATION_5,
+    _MIGRATION_6,
+    _MIGRATION_7,
+)
 SCHEMA_VERSION: Final = len(MIGRATIONS)
 
 
@@ -102,9 +178,13 @@ def new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 
-def utc_now() -> str:
+def utc_now(*, precise: bool = False) -> str:
     """Current time as a UTC ISO-8601 string (``2026-10-06T21:00:00Z``)."""
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return (
+        datetime.now(UTC)
+        .isoformat(timespec="microseconds" if precise else "seconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def parse_utc(value: str) -> datetime:
@@ -129,6 +209,9 @@ class Decision:
     content: str
     tag: str
     created_at: str
+    status: str = "open"
+    superseded_by: str | None = None
+    source: str = "manual"
 
 
 @dataclass(frozen=True)
@@ -155,6 +238,7 @@ class FileChange:
     symbols: list[dict[str, Any]]
     diff_snippet: str | None
     timestamp: str
+    line_delta: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -199,6 +283,9 @@ def _row_to_decision(row: sqlite3.Row) -> Decision:
         content=row["content"],
         tag=row["tag"],
         created_at=row["created_at"],
+        status=row["status"],
+        superseded_by=row["superseded_by"],
+        source=row["source"],
     )
 
 
@@ -241,6 +328,31 @@ def _row_to_test_run(row: sqlite3.Row) -> TestRun:
         skipped=row["skipped"],
         failures=_load_json_list(row["failures"]),
         timestamp=row["timestamp"],
+    )
+
+
+def _row_to_commit(row: sqlite3.Row) -> CommitRecord:
+    from contextbridge.core.git_history import ChangedFile, CommitRecord
+
+    try:
+        raw_files = json.loads(row["files"])
+    except json.JSONDecodeError:
+        raw_files = []
+    files = [
+        ChangedFile(path=str(item.get("path", "")), lines=int(item.get("lines", 0)))
+        for item in raw_files
+        if isinstance(item, dict)
+    ]
+    return CommitRecord(
+        sha=row["sha"],
+        short_sha=row["short_sha"],
+        author=row["author"],
+        committed_at=row["committed_at"],
+        subject=row["subject"],
+        files=files,
+        insertions=int(row["insertions"]),
+        deletions=int(row["deletions"]),
+        parsed_at=row["parsed_at"],
     )
 
 
@@ -369,34 +481,52 @@ class Database:
 
     # ----- decisions -------------------------------------------------------
 
-    def add_decision(self, session_id: str, content: str, tag: str = "note") -> Decision:
+    def add_decision(
+        self, session_id: str, content: str, tag: str = "note", *, source: str = "manual"
+    ) -> Decision:
         if tag not in DECISION_TAGS:
             raise UserError(f"Invalid tag {tag!r}; expected one of: {', '.join(DECISION_TAGS)}.")
         clean = sanitize(content).strip()
         if not clean:
             raise UserError("Log message is empty.")
+        clean_source = sanitize(source).strip()[:40] or "manual"
         did = new_id("dec")
         now = utc_now()
         try:
             with self.transaction() as conn:
                 conn.execute(
-                    "INSERT INTO decision_logs (id, session_id, content, tag, created_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (did, session_id, clean, tag, now),
+                    "INSERT INTO decision_logs (id, session_id, content, tag, created_at, source) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (did, session_id, clean, tag, now, clean_source),
                 )
                 conn.execute("UPDATE sessions SET last_updated = ? WHERE id = ?", (now, session_id))
         except sqlite3.IntegrityError as exc:
             raise StorageError(f"Cannot store decision: {exc}") from exc
-        return Decision(id=did, session_id=session_id, content=clean, tag=tag, created_at=now)
-
-    def list_decisions(self, session_id: str, *, limit: int | None = None) -> list[Decision]:
-        sql = (
-            "SELECT * FROM decision_logs WHERE session_id = ? ORDER BY created_at DESC, rowid DESC"
+        return Decision(
+            id=did,
+            session_id=session_id,
+            content=clean,
+            tag=tag,
+            created_at=now,
+            source=clean_source,
         )
-        params: tuple[object, ...] = (session_id,)
+
+    def list_decisions(
+        self, session_id: str, *, limit: int | None = None, tag: str | None = None
+    ) -> list[Decision]:
+        sql = "SELECT * FROM decision_logs WHERE session_id = ?"
+        params: list[object] = [session_id]
+        if tag is not None:
+            if tag not in DECISION_TAGS:
+                raise UserError(
+                    f"Invalid tag {tag!r}; expected one of: {', '.join(DECISION_TAGS)}."
+                )
+            sql += " AND tag=?"
+            params.append(tag)
+        sql += " ORDER BY created_at DESC, rowid DESC"
         if limit is not None:
             sql += " LIMIT ?"
-            params = (session_id, limit)
+            params.append(limit)
         return [_row_to_decision(r) for r in self.conn.execute(sql, params).fetchall()]
 
     def count_decisions_by_tag(self, session_id: str) -> dict[str, int]:
@@ -405,6 +535,245 @@ class Database:
             (session_id,),
         ).fetchall()
         return {r["tag"]: int(r["n"]) for r in rows}
+
+    def set_decision_status(
+        self, decision_id: str, status: str, *, superseded_by: str | None = None
+    ) -> None:
+        if status not in {"open", "resolved", "dismissed", "superseded"}:
+            raise UserError("Use open, resolved, dismissed or superseded.")
+        if not self.conn.execute(
+            "SELECT 1 FROM decision_logs WHERE id=?", (decision_id,)
+        ).fetchone():
+            raise UserError(f"No logged item with ID {decision_id}.")
+        if status == "superseded" and (
+            not superseded_by
+            or decision_id == superseded_by
+            or not self.conn.execute(
+                "SELECT 1 FROM decision_logs WHERE id=? AND status='open'", (superseded_by,)
+            ).fetchone()
+        ):
+            raise UserError("Choose a different open logged item as the replacement.")
+        self.conn.execute(
+            "UPDATE decision_logs SET status=?, superseded_by=? WHERE id=?",
+            (status, superseded_by, decision_id),
+        )
+
+    def delete_decision(self, decision_id: str) -> bool:
+        """Remove one logged item (used by the dashboard checklist). False if unknown."""
+        cur = self.conn.execute("DELETE FROM decision_logs WHERE id = ?", (decision_id,))
+        return cur.rowcount > 0
+
+    def tasks(
+        self, *, status: str | None = None, source: str | None = None, limit: int = 500
+    ) -> list[Decision]:
+        """Logged to-dos, newest first, optionally filtered by status or provenance."""
+        sql = "SELECT * FROM decision_logs WHERE tag='todo'"
+        params: list[object] = []
+        if status is not None:
+            if status not in {"open", "resolved", "dismissed", "superseded"}:
+                raise UserError("Use open, resolved, dismissed or superseded.")
+            sql += " AND status=?"
+            params.append(status)
+        if source is not None:
+            sql += " AND source=?"
+            params.append(sanitize(source)[:40])
+        sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        params.append(limit)
+        return [_row_to_decision(r) for r in self.conn.execute(sql, params).fetchall()]
+
+    def task_counts(self) -> dict[str, int]:
+        rows = self.conn.execute(
+            "SELECT status, COUNT(*) AS n FROM decision_logs WHERE tag='todo' GROUP BY status"
+        ).fetchall()
+        counts = {status: 0 for status in ("open", "resolved", "dismissed", "superseded")}
+        counts.update({r["status"]: int(r["n"]) for r in rows})
+        counts["total"] = sum(counts[s] for s in ("open", "resolved", "dismissed", "superseded"))
+        return counts
+
+    # ----- project intent (North Star) -------------------------------------
+
+    def get_intent(self) -> tuple[str, str] | None:
+        """The persistent project intent as ``(north_star, updated_at)``, if set."""
+        row = self.conn.execute(
+            "SELECT north_star, updated_at FROM project_intent WHERE id = 1"
+        ).fetchone()
+        return (str(row[0]), str(row[1])) if row else None
+
+    def set_intent(self, text: str) -> str:
+        """Store the single-row North Star intent; returns its update timestamp."""
+        clean = sanitize(text).strip()
+        if not clean:
+            raise UserError("Project intent is empty.")
+        now = utc_now()
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT INTO project_intent (id, north_star, updated_at) VALUES (1, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET north_star=excluded.north_star, "
+                "updated_at=excluded.updated_at",
+                (clean, now),
+            )
+        return now
+
+    # ----- git momentum -----------------------------------------------------
+
+    def replace_git_commits(self, commits: list[CommitRecord]) -> None:
+        """Store exactly the parsed history window; older rows fall out."""
+        with self.transaction() as conn:
+            conn.execute("DELETE FROM git_history")
+            for commit in commits:
+                conn.execute(
+                    "INSERT INTO git_history (sha, short_sha, author, committed_at, subject, "
+                    "files, insertions, deletions, parsed_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        commit.sha,
+                        commit.short_sha,
+                        commit.author,
+                        commit.committed_at,
+                        commit.subject,
+                        json.dumps(
+                            [{"path": f.path, "lines": f.lines} for f in commit.files],
+                            ensure_ascii=False,
+                        ),
+                        commit.insertions,
+                        commit.deletions,
+                        commit.parsed_at,
+                    ),
+                )
+
+    def list_git_commits(self, limit: int = 15) -> list[CommitRecord]:
+        # Rows are replaced wholesale in `git log` order (newest first), so rowid order
+        # *is* the parsed order, including for commits sharing a timestamp.
+        rows = self.conn.execute(
+            "SELECT * FROM git_history ORDER BY rowid LIMIT ?",
+            (max(1, min(limit, 100)),),
+        ).fetchall()
+        return [_row_to_commit(row) for row in rows]
+
+    def older_work(self, session_id: str) -> list[str]:
+        rows = self.conn.execute(
+            "SELECT s.id, s.branch_name, COUNT(d.id) AS n, MAX(d.content) AS example "
+            "FROM sessions s JOIN decision_logs d ON d.session_id=s.id "
+            "WHERE s.id != ? AND d.tag='note' AND d.status='open' "
+            "AND lower(d.content) NOT LIKE 'goal:%' AND lower(d.content) NOT LIKE 'next:%' "
+            "GROUP BY s.id ORDER BY s.start_time DESC LIMIT 5",
+            (session_id,),
+        ).fetchall()
+        return [
+            sanitize(
+                f"Earlier session {r['branch_name']}: {r['n']} recorded notes; "
+                + r["example"].split(". ", 1)[0][:180]
+                + "."
+            )
+            for r in rows
+        ]
+
+    def cached_summary(
+        self, path: str, content_hash: str, profile: str, chunk_index: int = -1
+    ) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT summary_json FROM file_summaries "
+            "WHERE path=? AND content_hash=? AND profile=? AND chunk_index=?",
+            (path, content_hash, profile, chunk_index),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def cache_summary(
+        self,
+        path: str,
+        content_hash: str,
+        profile: str,
+        summary: dict[str, Any],
+        chunk_index: int = -1,
+    ) -> None:
+        # Only derived summaries are stored, never source chunks or prompts.
+        with self.transaction() as conn:
+            conn.execute(
+                "DELETE FROM file_summaries WHERE path=? AND content_hash!=?", (path, content_hash)
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO file_summaries VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    path,
+                    content_hash,
+                    profile,
+                    chunk_index,
+                    json.dumps(_sanitize_json(summary)),
+                    utc_now(),
+                ),
+            )
+
+    def file_summaries(self) -> list[dict[str, Any]]:
+        """Reusable labels and imports for diagram consumers; source code is never stored."""
+        rows = self.conn.execute(
+            "SELECT path, content_hash, profile, summary_json FROM file_summaries "
+            "WHERE chunk_index=-1 ORDER BY updated_at DESC, rowid DESC"
+        ).fetchall()
+        return [
+            {**json.loads(r[3]), "path": r[0], "content_hash": r[1], "profile": r[2]} for r in rows
+        ]
+
+    def cache_explanation(
+        self, path: str, content_hash: str, profile: str, text: str, names: list[str]
+    ) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                "DELETE FROM file_explanations WHERE path=? AND content_hash!=?",
+                (path, content_hash),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO file_explanations VALUES (?,?,?,?,?,?)",
+                (
+                    path,
+                    content_hash,
+                    profile,
+                    sanitize(text),
+                    json.dumps(_sanitize_json(names)),
+                    utc_now(),
+                ),
+            )
+
+    def explanation(self, path: str, content_hash: str, profile: str) -> str:
+        row = self.conn.execute(
+            "SELECT explanation FROM file_explanations "
+            "WHERE path=? AND content_hash=? AND profile=?",
+            (path, content_hash, profile),
+        ).fetchone()
+        return row[0] if row else ""
+
+    def file_explanations(self) -> list[dict[str, str]]:
+        return [
+            dict(r) | {"label": "AI-written"}
+            for r in self.conn.execute(
+                "SELECT path, content_hash, profile, explanation FROM file_explanations "
+                "ORDER BY updated_at DESC, rowid DESC"
+            ).fetchall()
+        ]
+
+    def component_explanations(self) -> list[dict[str, Any]]:
+        return [
+            dict(json.loads(r[3]), path=r[0], content_hash=r[1], profile=r[2])
+            for r in self.conn.execute(
+                "SELECT path, content_hash, profile, summary_json FROM component_explanations "
+                "ORDER BY updated_at DESC, rowid DESC"
+            ).fetchall()
+        ]
+
+    def cache_component(self, path: str, digest: str, profile: str, result: dict[str, Any]) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO component_explanations VALUES (?,?,?,?,?)",
+            (path, digest, profile, json.dumps(_sanitize_json(result)), utc_now()),
+        )
+
+    def save_limits(self, profile: str, state: dict[str, Any]) -> None:
+        self.conn.execute(
+            "INSERT OR REPLACE INTO provider_limits VALUES (?,?)", (profile, json.dumps(state))
+        )
+
+    def load_limits(self, profile: str) -> dict[str, Any] | None:
+        row = self.conn.execute(
+            "SELECT state_json FROM provider_limits WHERE profile=?", (profile,)
+        ).fetchone()
+        return json.loads(row[0]) if row else None
 
     # ----- handoffs --------------------------------------------------------
 
@@ -471,7 +840,14 @@ class Database:
 
     def count_all(self) -> dict[str, int]:
         """Row counts of everything `cb clear --all` would delete."""
-        tables = ("sessions", "decision_logs", "file_changes", "test_runs", "handoffs")
+        tables = (
+            "sessions",
+            "decision_logs",
+            "file_changes",
+            "test_runs",
+            "handoffs",
+            "change_batches",
+        )
         return {
             t: int(self.conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]) for t in tables
         }
@@ -484,6 +860,77 @@ class Database:
             conn.execute("DELETE FROM handoffs")
             conn.execute("DELETE FROM sessions")  # cascades to decisions/changes/test runs
         return counts
+
+    def add_commit_changes(self, session_id: str, sha: str, files: list[FileDiff]) -> int:
+        """All files of a commit are recorded together, including on concurrent retries."""
+        now = utc_now(precise=True)
+        with self.transaction() as conn:
+            if self.has_commit(sha):
+                return 0
+            for item in files:
+                conn.execute(
+                    "INSERT INTO file_changes (id, session_id, commit_sha, file_path, change_type, "
+                    "symbols_modified, diff_snippet, timestamp) VALUES (?, ?, ?, ?, ?, '[]', ?, ?)",
+                    (
+                        new_id("chg"),
+                        session_id,
+                        sha,
+                        sanitize(item.path),
+                        item.change_type.value,
+                        item.snippet,
+                        now,
+                    ),
+                )
+            conn.execute("UPDATE sessions SET last_updated = ? WHERE id = ?", (now, session_id))
+        return len(files)
+
+    def add_change_batch(
+        self,
+        session_id: str,
+        files: list[dict[str, str]],
+        duration: float,
+        event_count: int,
+        agent: str | None = None,
+        notes: str = "",
+    ) -> str:
+        """Atomically store a batch and path/summary rows for existing context readers."""
+        batch_id, timestamp = new_id("batch"), utc_now(precise=True)
+        clean = _sanitize_json(files)
+        summary = f"{len(files)} files changed in {duration:.1f}s"
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT INTO change_batches VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    batch_id,
+                    session_id,
+                    timestamp,
+                    duration,
+                    event_count,
+                    json.dumps(clean),
+                    summary,
+                    sanitize(agent) if agent else None,
+                    sanitize(notes),
+                ),
+            )
+            for item in clean:
+                conn.execute(
+                    "INSERT INTO file_changes "
+                    "(id, session_id, file_path, change_type, symbols_modified, "
+                    "diff_snippet, timestamp) "
+                    "VALUES (?, ?, ?, ?, '[]', ?, ?)",
+                    (
+                        new_id("chg"),
+                        session_id,
+                        item["path"],
+                        item["change_type"],
+                        item["summary"],
+                        timestamp,
+                    ),
+                )
+            conn.execute(
+                "UPDATE sessions SET last_updated = ? WHERE id = ?", (timestamp, session_id)
+            )
+        return summary
 
     # ----- file changes ----------------------------------------------------
 
@@ -525,7 +972,7 @@ class Database:
         if change_type not in CHANGE_TYPES:
             raise UserError(f"Invalid change type {change_type!r}.")
         fid = new_id("chg")
-        now = utc_now()
+        now = utc_now(precise=True)
         clean_path = sanitize(file_path)
         clean_symbols = _sanitize_json(symbols or [])
         clean_snippet = sanitize(diff_snippet) if diff_snippet is not None else None
@@ -584,7 +1031,7 @@ class Database:
         failures: list[dict[str, str]] | None = None,
     ) -> TestRun:
         tid = new_id("run")
-        now = utc_now()
+        now = utc_now(precise=True)
         clean_command = sanitize(command)
         clean_failures = _sanitize_json((failures or [])[:MAX_STORED_FAILURES])
         try:
@@ -626,6 +1073,15 @@ class Database:
             (session_id,),
         ).fetchone()
         return _row_to_test_run(row) if row else None
+
+    def test_runs(self, session_id: str, *, limit: int = 20) -> list[TestRun]:
+        """Recorded runs of one session, newest first (bounded for history views)."""
+        rows = self.conn.execute(
+            "SELECT * FROM test_runs WHERE session_id = ? ORDER BY timestamp DESC, rowid DESC "
+            "LIMIT ?",
+            (session_id, max(int(limit), 1)),
+        ).fetchall()
+        return [_row_to_test_run(r) for r in rows]
 
 
 @dataclass(frozen=True)

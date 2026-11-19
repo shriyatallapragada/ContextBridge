@@ -23,12 +23,12 @@ def cb(*args: str, input: str | None = None) -> tuple[int, str]:
 
 
 def _state(repo: Path) -> dict[str, Any]:
-    data: dict[str, Any] = json.loads((repo / ".context" / "state.json").read_text())
+    data: dict[str, Any] = json.loads((repo / ".contextbridge" / "state.json").read_text())
     return data
 
 
 def _rows(repo: Path, sql: str) -> list[sqlite3.Row]:
-    conn = sqlite3.connect(repo / ".context" / "state.db")
+    conn = sqlite3.connect(repo / ".contextbridge" / "state.db")
     conn.row_factory = sqlite3.Row
     try:
         return conn.execute(sql).fetchall()
@@ -44,7 +44,11 @@ def repo(git_repo: Path) -> Path:
     commit_all(git_repo, "ignore .context/")
     cb("log", "Prices are integer cents", "--tag", "architecture")
     cb("log", "Empty cart crashes checkout", "--tag", "blocker")
-    write(git_repo, "cart.py", "def total(items):\n    return sum(i.cents for i in items)\n")
+    write(
+        git_repo,
+        "cart.py",
+        "def total(items):\n    values = [i.cents for i in items]\n    return sum(values)\n",
+    )
     commit_all(git_repo, "integer cents")
     cb("hook", "post-commit")
     return git_repo
@@ -72,7 +76,8 @@ def test_acceptance_handoff_writes_the_right_file(repo: Path, agent: str, relati
     text = target.read_text()
     assert MARKER_START in text
     assert "Prices are integer cents" in text and "Empty cart crashes checkout" in text
-    assert "cart.py" in text and "total" in text
+    assert "cart.py" in text
+    assert "def total" not in text
     others = {"CLAUDE.md", ".cursor/rules/handoff.mdc", "HANDOFF.md"} - {relative}
     assert not any((repo / o).exists() for o in others)  # only the target was written
     assert f"wrote {relative}" in out.replace("\n", " ") or relative in out
@@ -150,7 +155,7 @@ def test_dry_run_writes_nothing(repo: Path) -> None:
 def test_unknown_agent_fails_before_any_work(repo: Path) -> None:
     code, out = cb("handoff", "--from", "claude", "--to", "gemini")
     assert code == 1
-    assert "Unknown agent 'gemini'" in out and "claude, cursor, generic" in out
+    assert "Unknown agent 'gemini'" in out and "claude, codex, cursor, generic, kiro" in out
     assert _rows(repo, "SELECT * FROM handoffs") == []
     assert cb("handoff", "--dry-run", "--to", "gemini")[0] == 1
 
@@ -190,14 +195,14 @@ def test_secrets_never_reach_the_files_or_database(repo: Path) -> None:
     cb("log", "key is AKIAIOSFODNN7EXAMPLE", "--tag", "blocker")
     write(repo, "config.py", 'TOKEN = "ghp_' + "Q1w2E3r4T5" * 4 + '"\n')
     write(repo, ".env", "API_SECRET=hunter2hunter2\n")
-    for agent in ("claude", "cursor", "generic"):
+    for agent in ("claude", "codex", "cursor", "generic", "kiro"):
         assert cb("handoff", "--from", "x", "--to", agent)[0] == 0
     blob = (
         b"".join(
             p.read_bytes()
             for p in (repo / "CLAUDE.md", repo / "HANDOFF.md", repo / ".cursor/rules/handoff.mdc")
         )
-        + (repo / ".context" / "state.db").read_bytes()
+        + (repo / ".contextbridge" / "state.db").read_bytes()
     )
     for secret in (b"AKIAIOSFODNN7EXAMPLE", b"ghp_", b"hunter2"):
         assert secret not in blob
@@ -263,7 +268,7 @@ def test_clear_all_asks_for_confirmation(repo: Path) -> None:
 
 def test_clear_all_confirmed_deletes_everything(repo: Path) -> None:
     cb("handoff", "--from", "a", "--to", "generic")
-    vector = repo / ".context" / "vector_db"
+    vector = repo / ".contextbridge" / "vector_db"
     vector.mkdir()
     (vector / "index.bin").write_bytes(b"x")
     code, out = cb("clear", "--all", input="y\n")
@@ -273,7 +278,7 @@ def test_clear_all_confirmed_deletes_everything(repo: Path) -> None:
     state = _state(repo)
     assert state["active_session_id"] is None and state["last_handoff"] is None
     assert not vector.exists()
-    assert (repo / ".context" / "config.json").exists()  # config survives
+    assert (repo / ".contextbridge" / "config.json").exists()  # config survives
     assert (repo / "HANDOFF.md").exists()  # agent files survive without --cleanup-adapters
     assert cb("log", "after clear")[0] == 0  # the workspace still works
 

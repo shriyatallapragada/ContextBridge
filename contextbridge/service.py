@@ -18,10 +18,21 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from contextbridge.adapters.base_adapter import MAX_ACTIVE_FILES, BaseAdapter
+if TYPE_CHECKING:
+    from contextbridge.synthesis.project_summary import ProjectOverview
+
+from contextbridge.adapters.base_adapter import BaseAdapter
 from contextbridge.adapters.registry import all_adapters, get_adapter, resolve_name
+from contextbridge.chat_bridge import (
+    ChatPacket,
+    build_chat_packet,
+    chat_sections,
+    chat_warnings,
+    condense_chat,
+)
+from contextbridge.chat_files import ImportedChat, read_chat_file
 from contextbridge.config import save_config
 from contextbridge.core.git_observer import HOOK_START, GitObserver, HookResult
 from contextbridge.core.sanitizer import SanitizeResult, sanitize, sanitize_with_report
@@ -39,6 +50,7 @@ from contextbridge.errors import (
     UnknownAgentError,
     UserError,
 )
+from contextbridge.project_map import ProjectMap, graph_view, scan_project
 from contextbridge.storage.db import (
     Decision,
     HandoffRecord,
@@ -50,12 +62,19 @@ from contextbridge.storage.db import (
 )
 from contextbridge.storage.workspace import (
     Workspace,
+    detect_branch,
     ensure_gitignored,
     find_context_dir,
     find_project_root,
 )
-from contextbridge.synthesis.compressor import Handoff, build_handoff, format_ratio
+from contextbridge.synthesis.compressor import (
+    Handoff,
+    build_handoff,
+    format_ratio,
+    prioritized_files,
+)
 from contextbridge.synthesis.context_builder import SessionContext, build_context
+from contextbridge.synthesis.facts import is_test
 
 log = logging.getLogger("contextbridge")
 
@@ -136,6 +155,14 @@ class Snapshot:
 
     context: SessionContext
     last_handoff: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class GuideContent:
+    files: list[tuple[str, str]]
+    progress: str
+    next_steps: str
+    suggestions: str
 
 
 @dataclass(frozen=True)
@@ -269,7 +296,7 @@ class ProjectService:
     # ----- setup -------------------------------------------------------------------------
 
     def init(self, *, install_hook: bool = True, verbose: bool = False) -> InitResult:
-        """Create `.context/`, the database and a session; optionally install the hook."""
+        """Create `.contextbridge/`, the database and a session; optionally install the hook."""
         ws, created_dir = Workspace.create(self.root)
         ws.setup_logging(verbose=verbose)
         ws.load_config()  # Fail early on an invalid config file.
@@ -322,6 +349,252 @@ class ProjectService:
             raise NotAGitRepoError(str(self.root))
         return observer.uninstall_hook()
 
+    def ingest_head(self) -> int:
+        from contextbridge.core.change_logger import ingest_head
+
+        return ingest_head(self._require_init())
+
+    def guide_content(self, snapshot: Snapshot) -> GuideContent:
+        ctx = snapshot.context
+        files: list[tuple[str, str]] = []
+        for item in ctx.files:
+            path = item.path.lower()
+            purpose = "Project file; consult its contents and documentation for its exact role."
+            if "test" in path:
+                purpose = (
+                    "Checks expected behavior; a test file's presence does not prove it passes."
+                )
+            elif "readme" in path or path.endswith(".md"):
+                purpose = "Documentation explaining usage, decisions, or intended behavior."
+            elif "config" in path or path.endswith((".toml", ".yaml", ".json")):
+                purpose = "Configuration or structured data used by the project or its tools."
+            elif "gui/" in path or "components/" in path:
+                purpose = "Interface code: screens or components a user interacts with."
+            elif "adapter" in path:
+                purpose = "Integration code connecting the app with another tool or format."
+            elif path.endswith((".py", ".js", ".ts", ".tsx")):
+                purpose = "Program logic; its exact responsibilities require reading the code."
+            files.append((item.path, purpose))
+        progress = [
+            f"# {ctx.project}\n\nBranch: `{ctx.branch}`",
+            "",
+            "## Recorded commits\n\n_Not independently verified._\n",
+        ]
+        progress += [f"- {c.subject}" for c in ctx.commits] or [
+            "No commits captured in this session."
+        ]
+        progress += [
+            "",
+            "## Changed files\n\n_Changes do not necessarily mean completed features._\n",
+        ]
+        progress += [f"- {f.path}: {f.change_type}" for f in ctx.files] or [
+            "No file changes captured."
+        ]
+        plans = [f"- {d.content}" for d in ctx.decisions_tagged("todo")]
+        blockers = [f"- {d.content}" for d in ctx.decisions_tagged("blocker")]
+        progress_text = sanitize("\n".join(progress))
+        next_steps = sanitize(
+            "## Recorded to-dos\n\n"
+            + "\n".join(plans or ["None recorded. Add a To-do in Notes."])
+            + "\n\n## Recorded blockers\n\n"
+            + "\n".join(blockers or ["None recorded."])
+        )
+        suggestions = ["These are rule-based suggestions, not an assessment of code quality."]
+        if ctx.tests_failing:
+            suggestions.append("- Resolve the recorded failing test run before adding features.")
+        elif ctx.test_run is None:
+            suggestions.append(
+                "- Record a test run to give the next person evidence of what works."
+            )
+        if not plans:
+            suggestions.append(
+                "- Add one concrete next step in Notes so a new assistant knows where to start."
+            )
+        if any(f.uncommitted for f in ctx.files):
+            suggestions.append(
+                "- Review unfinished changes before describing them as completed work."
+            )
+        suggestions.append("- Ask a new user to follow the README and record where they get stuck.")
+        suggestion_text = (
+            "## Suggestions\n\n" + suggestions[0] + "\n\n" + "\n".join(suggestions[1:])
+        )
+        return GuideContent(files, progress_text, next_steps, suggestion_text)
+
+    def project_map(self) -> ProjectMap:
+        cached, explanations, components = [], [], []
+        if self.is_initialized():
+            with self.ws.open_db() as db:
+                cached = db.file_summaries()
+                explanations = db.file_explanations()
+                components = db.component_explanations()
+        return scan_project(
+            self.root,
+            cached=cached,
+            explanations=explanations,
+            components=components,
+            ignore_globs=self.ws.load_config().capture.ignore_globs,
+        )
+
+    def project_graph(
+        self, view: str = "overview", *, module: str | None = None, limit: int = 24
+    ) -> dict[str, Any]:
+        return graph_view(self.project_map(), view, module, limit)
+
+    def working_changes(self) -> dict[str, Any]:
+        """Working-tree-only changes: branch, per-file line counts and totals.
+
+        Read straight from git on demand; no watcher or database write is involved.
+        """
+        observer = self._observer()
+        counts = {"total": 0, "staged": 0, "unstaged": 0, "untracked": 0}
+        if observer is None:
+            return {"branch": detect_branch(self.root), "files": [], "counts": counts}
+        ignore_globs = self.ws.load_config().capture.ignore_globs if self.is_initialized() else []
+        changes = observer.working_changes(ignore_globs=ignore_globs)
+        for change in changes:
+            if change.status == "untracked":
+                counts["untracked"] += 1
+            if change.status in ("staged", "staged+unstaged"):
+                counts["staged"] += 1
+            if change.status in ("unstaged", "staged+unstaged"):
+                counts["unstaged"] += 1
+        counts["total"] = len(changes)
+        return {
+            "branch": observer.current_branch() or detect_branch(self.root),
+            "files": [
+                {
+                    "path": change.path,
+                    "status": change.status,
+                    "insertions": change.insertions,
+                    "deletions": change.deletions,
+                }
+                for change in changes
+            ],
+            "counts": counts,
+        }
+
+    def file_explanation_notice(self, path: str) -> str:
+        from contextbridge.providers import create_provider
+
+        cfg = self.ws.load_config().llm
+        if cfg.provider == "none":
+            raise UserError(
+                "Choose a model provider in Settings to explain a file. The overview works offline."
+            )
+        selected = create_provider(self.ws.load_config(), read_credentials=False)
+        endpoint = getattr(selected, "endpoint", cfg.provider)
+        return sanitize(
+            f"Explain {path} using {cfg.provider} at {endpoint} ({selected.model}). "
+            "A small excerpt of this file and its symbol/import names "
+            "will be sent to this provider. "
+            "Secrets are redacted; ignored files and keys are excluded. "
+            "The AI-written result is cached until this file changes. Continue?"
+        )
+
+    def explain_file(
+        self,
+        path: str,
+        *,
+        notify: Callable[[str], None] | None = None,
+        token_budget: int | None = None,
+    ) -> str:
+        from contextbridge.synthesis.project_summary import ProjectSummarizer
+
+        self.file_explanation_notice(path)
+        if not self.is_initialized():
+            self.init(install_hook=False)
+        with self.ws.open_db() as db:
+            result = ProjectSummarizer(
+                self.root, db, self.ws.load_config(), notify=notify
+            ).summarize(only_file=path, explain=True, token_budget=token_budget)
+        explanation = next((f.ai_explanation for f in result.files if f.path == path), "")
+        if not explanation:
+            raise UserError(
+                "No valid explanation returned. "
+                + (" ".join(result.warnings) or "Try again or check the selected provider.")
+            )
+        return explanation
+
+    def project_explanation_notice(self, requests: int, tokens: int) -> str:
+        notice = self.file_explanation_notice("project files")
+        return notice.replace(
+            "A small excerpt of this file and its symbol/import names",
+            "Small file excerpts and their symbol/import names",
+        ) + (
+            f"\nBudget: {requests} requests; {tokens:,} reserved tokens "
+            "(estimated input plus maximum output, including retries and folder summaries). "
+            "Files are processed by importance; cached explanations are reused. "
+            "Folder summaries send file explanations only. "
+            "Rate limits stop the run with progress saved."
+        )
+
+    def explain_project(
+        self,
+        *,
+        max_requests: int = 20,
+        token_budget: int = 40000,
+        component: str | None = None,
+        notify: Callable[[str], None] | None = None,
+    ) -> str:
+        from dataclasses import replace
+
+        from contextbridge.project_map import _component_groups
+        from contextbridge.synthesis.project_summary import ProjectSummarizer
+
+        self.project_explanation_notice(max_requests, token_budget)
+        if not 1 <= max_requests <= 200 or not 1000 <= token_budget <= 1000000:
+            raise UserError("Choose 1-200 requests and 1,000-1,000,000 reserved tokens.")
+        selected = None
+        if component is not None:
+            model = self.project_map()
+            groups = _component_groups(
+                [n for n in model.graph_nodes.values() if n.kind in {"file", "module"}]
+            )
+            if component not in groups:
+                raise UserError("Choose a component from this project's overview.")
+            selected = {n.path for n in groups[component]}
+        if not self.is_initialized():
+            self.init(install_hook=False)
+        cfg = self.ws.load_config()
+        cfg = replace(cfg, summary=replace(cfg.summary, max_requests=max_requests))
+        with self.ws.open_db() as db:
+            summarizer = ProjectSummarizer(self.root, db, cfg, notify=notify)
+            result = summarizer.summarize(
+                explain_project=True,
+                explain=True,
+                token_budget=token_budget,
+                selected_files=selected,
+                component_group=component,
+            )
+        available = sum(bool(f.ai_explanation) for f in result.files)
+        return (
+            f"{'Stopped' if summarizer.stopped else 'Finished'}: {available} files explained; "
+            f"{result.requests}/{max_requests} requests; "
+            f"{result.tokens_reserved:,}/{token_budget:,} reserved tokens. "
+            + " ".join(result.warnings)
+        )
+
+    def document_path(self, path: Path) -> Path:
+        """Validate a document selection before scheduling a background read."""
+        path = path.resolve()
+        if not path.is_relative_to(self.root) or path.suffix.lower() not in (
+            ".md",
+            ".txt",
+            ".rst",
+            "",
+        ):
+            raise UserError("Choose a Markdown or text document inside this project.")
+        return path
+
+    def read_document(self, path: Path) -> str:
+        path = self.document_path(path)
+        with path.open(encoding="utf-8", errors="replace") as stream:
+            text = stream.read(128001)
+        suffix = (
+            "\n\n> Document excerpt limited to 128,000 characters." if len(text) > 128000 else ""
+        )
+        return sanitize(text[:128000]) + suffix
+
     # ----- reading -----------------------------------------------------------------------
 
     def snapshot(self, *, include_worktree: bool = True) -> Snapshot:
@@ -334,6 +607,7 @@ class ProjectService:
                 session,
                 config,
                 project=ws.load_state().project_name,
+                root=ws.root,
                 observer=self._observer(),
                 include_worktree=include_worktree,
             )
@@ -346,6 +620,18 @@ class ProjectService:
             raise UserError("Search query is empty.")
         with ws.open_db() as db:
             return keyword_search(db, query, limit=limit)
+
+    def semantic_search(self, query: str, limit: int = 10) -> list[SearchHit]:
+        from contextbridge.storage.vector_store import VectorStore
+
+        ws = self._require_init()
+        query = sanitize(query).strip()
+        if not query:
+            raise UserError("Search query is empty.")
+        store = VectorStore(ws.context_dir / VECTOR_DIRNAME)
+        with ws.open_db() as db:
+            store.sync(db)
+        return store.search(query, limit=limit)
 
     # ----- writing notes and test runs ---------------------------------------------------
 
@@ -398,14 +684,40 @@ class ProjectService:
         run = self.record_test_run(command.strip(), result, report)
         return TestOutcome(run=run, report=report, result=result)
 
+    def test_history(self, *, limit: int = 20) -> list[TestRun]:
+        """Recorded runs of the active session, newest first (bounded)."""
+        ws = self._require_init()
+        with ws.open_db() as db:
+            session, _ = ws.active_session(db)
+            return db.test_runs(session.id, limit=limit)
+
     # ----- handoff -----------------------------------------------------------------------
+
+    def summarize(
+        self,
+        *,
+        no_llm: bool = False,
+        refresh: bool = False,
+        explain: bool | None = None,
+        cached_only: bool = False,
+        notify: Callable[[str], None] | None = None,
+    ) -> ProjectOverview:
+        from contextbridge.synthesis.project_summary import ProjectSummarizer
+
+        if not self.is_initialized():
+            self.init(install_hook=False)
+        with self.ws.open_db() as db:
+            return ProjectSummarizer(self.root, db, self.ws.load_config(), notify=notify).summarize(
+                no_llm=no_llm, refresh=refresh, explain=explain, cached_only=cached_only
+            )
 
     def prepare_handoff(
         self,
-        from_agent: str | None,
-        to_agent: str | None,
+        from_agent: str | None = None,
+        to_agent: str | None = None,
         *,
-        use_llm: bool = True,
+        use_llm: bool | None = None,
+        budget: int | None = None,
         force: bool = False,
         notify: Callable[[str], None] | None = None,
     ) -> PreparedHandoff:
@@ -414,7 +726,21 @@ class ProjectService:
         config = ws.load_config()
         # Validate the target before doing any work, so a typo fails instantly.
         adapter = get_adapter(to_agent, ws.root, force=force) if to_agent else None
-        label = agent_label(from_agent)
+        if budget is not None:
+            if budget < 120:
+                raise UserError("Use a budget of at least 120 tokens for the handoff sections.")
+            config.handoff.target_tokens = config.handoff.hard_cap_tokens = budget
+        detected = (
+            os.environ.get("CB_AGENT")
+            or ("codex" if os.environ.get("CODEX_THREAD_ID") else None)
+            or ("claude" if os.environ.get("CLAUDECODE") else None)
+            or "unknown"
+        )
+        label = agent_label(from_agent) or agent_label(detected) or "unknown"
+        if adapter and label == adapter.name and notify:
+            notify(
+                "Warning — the source and destination are the same agent. Check --from and --to."
+            )
         with ws.open_db() as db:
             session, _ = ws.active_session(db)
             context = build_context(
@@ -422,14 +748,26 @@ class ProjectService:
                 session,
                 config,
                 project=ws.load_state().project_name,
+                root=ws.root,
                 observer=self._observer(),
             )
+            from contextbridge.synthesis.project_summary import ProjectSummarizer
+
+            overview = ProjectSummarizer(ws.root, db, config).summarize(
+                no_llm=True, cached_only=True
+            )
+            context.file_purposes = {f.path: f.purpose for f in overview.files}
+            context.summary_files = [f.path for f in overview.files if not is_test(f.path)][:8]
+            if sum(d.tag == "note" and d.status == "open" for d in context.decisions) < 4:
+                context.parts = [
+                    f"{f.path} — {f.purpose}" for f in overview.files if not is_test(f.path)
+                ][:8]
         handoff = build_handoff(
             context,
             config,
             from_agent=label,
             to_agent=adapter.name if adapter else None,
-            no_llm=not use_llm,
+            no_llm=not (config.handoff.polish if use_llm is None else use_llm),
             notify=notify,
         )
         return PreparedHandoff(
@@ -438,7 +776,7 @@ class ProjectService:
             handoff=handoff,
             adapter=adapter,
             from_label=label,
-            active_files=[f.path for f in context.files[:MAX_ACTIVE_FILES]],
+            active_files=[item.path for item in prioritized_files(context)],
         )
 
     def commit_handoff(self, prepared: PreparedHandoff) -> CommittedHandoff:
@@ -557,33 +895,64 @@ class ProjectService:
         ws.load_config()  # Validate what we just wrote.
 
 
+class ChatService:
+    """Project-independent chat operations shared by front ends."""
+
+    @staticmethod
+    def prepare(transcript: str, goal: str, pinned: str, budget: int = 6000) -> ChatPacket:
+        return build_chat_packet(transcript, goal, pinned, budget)
+
+    @staticmethod
+    def handoff(
+        transcript: str, goal: str = "", pinned: str = "", budget: int = 6000
+    ) -> dict[str, Any]:
+        """The chat handoff packet plus its deterministic sections (no model calls)."""
+        try:
+            packet = build_chat_packet(transcript, goal, pinned, budget)
+            sections = chat_sections(transcript, goal, pinned)
+        except ValueError as exc:
+            raise UserError(str(exc)) from None
+        return {
+            "text": packet.text,
+            "warnings": list(packet.warnings),
+            "sections": sections,
+            "source_chars": packet.source_chars,
+            "omitted_chars": packet.omitted_chars,
+        }
+
+    @staticmethod
+    def condense(transcript: str, goal: str, pinned: str, budget: int = 2000) -> ChatPacket:
+        if len(goal) > 1000 or len(pinned) > 1000:
+            raise ValueError("Keep the goal and essential facts under 1,000 characters each.")
+        text = condense_chat(transcript, goal=goal, pinned=pinned, budget=budget)
+        return ChatPacket(
+            text, len(transcript), max(0, len(transcript) - len(text)), chat_warnings(transcript)
+        )
+
+    @staticmethod
+    def import_file(path: Path) -> ImportedChat:
+        return read_chat_file(path)
+
+
 def check_ollama(host: str, model: str) -> OllamaCheck:
     """Is Ollama running, and does it have ``model``? Never raises."""
-    try:
-        import ollama
+    from contextbridge.providers.settings import ProviderSettingsService
 
-        listing = ollama.Client(host=host, timeout=OLLAMA_CHECK_TIMEOUT).list()
-        names = {m.model for m in listing.models if m.model}
-    except ConnectionError:
-        return OllamaCheck(False, "Ollama isn't running. Open the Ollama app, then try again.")
-    except Exception as exc:
-        return OllamaCheck(False, f"Couldn't talk to Ollama ({type(exc).__name__}).")
-    wanted = {model, f"{model}:latest"}
-    if names & wanted:
-        return OllamaCheck(True, f"Ollama is running and {model} is ready.")
-    return OllamaCheck(
-        False,
-        f"Ollama is running, but {model} isn't installed yet. Install it with: ollama pull {model}",
-    )
+    result = ProviderSettingsService().check("ollama", model, host)
+    return OllamaCheck(result.ok, result.message)
 
 
 __all__ = [
     "AISettings",
+    "ChatService",
     "CommittedHandoff",
+    "GuideContent",
+    "ImportedChat",
     "InitResult",
     "NoteResult",
     "OllamaCheck",
     "PreparedHandoff",
+    "ProjectMap",
     "ProjectService",
     "Snapshot",
     "TestOutcome",

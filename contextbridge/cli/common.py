@@ -39,7 +39,7 @@ def app_context(ctx: typer.Context) -> AppContext:
 
 
 def open_workspace(ctx: typer.Context) -> Workspace:
-    """Locate `.context/` from the start dir and set up file logging."""
+    """Locate current or legacy storage from the start dir and set up file logging."""
     actx = app_context(ctx)
     ws = Workspace.locate(actx.start_dir)
     ws.setup_logging(verbose=actx.verbose)

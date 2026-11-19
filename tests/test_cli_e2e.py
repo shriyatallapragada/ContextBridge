@@ -61,7 +61,7 @@ def cb(repo: Path, *args: str, expect: int = 0) -> subprocess.CompletedProcess[s
 
 
 def state(repo: Path) -> dict[str, object]:
-    data: dict[str, object] = json.loads((repo / ".context" / "state.json").read_text())
+    data: dict[str, object] = json.loads((repo / ".contextbridge" / "state.json").read_text())
     return data
 
 
@@ -76,7 +76,14 @@ def project(git_repo: Path) -> Path:
     cb(git_repo, "log", "Prices are stored as integer cents", "--tag", "architecture")
     cb(git_repo, "log", "Empty cart crashes checkout", "--tag", "blocker")
     cb(git_repo, "log", "Add discount codes", "--tag", "todo")
-    write(git_repo, "cart.py", CART.replace("sum(self.items)", "sum(i.cents for i in self.items)"))
+    write(
+        git_repo,
+        "cart.py",
+        CART.replace(
+            "return sum(self.items)",
+            "values = [i.cents for i in self.items]\n        return sum(values)",
+        ),
+    )
     commit_all(git_repo, "use integer cents")
     cb(git_repo, "hook", "post-commit")
     write(git_repo, "tests/test_cart.py", TESTS)
@@ -104,9 +111,9 @@ def test_full_workflow(project: Path) -> None:
     status = cb(repo, "status").stdout
     # (The test counts are asserted from the database below: the status panel wraps the
     # long command line, so its text depends on the width of the interpreter path.)
-    for needle in ("integer cents", "Empty cart crashes", "Cart.total", "Last test run"):
+    for needle in ("integer cents", "Empty cart crashes", "cart.py", "Last test run"):
         assert needle in status, needle
-    conn = sqlite3.connect(repo / ".context" / "state.db")
+    conn = sqlite3.connect(repo / ".contextbridge" / "state.db")
     try:
         run = conn.execute("SELECT passed, failed, skipped FROM test_runs").fetchall()
     finally:
@@ -140,8 +147,9 @@ def test_full_workflow(project: Path) -> None:
         assert text.count("<!-- contextbridge:start -->") == 1, agent
         for needle in ("integer cents", "Empty cart crashes checkout", "Add discount codes"):
             assert needle in text, (agent, needle)
-        assert "tests/test_cart.py::test_empty_cart_total" in text, agent
-        assert "Cart.total" in text, agent
+        assert "1 failing" in text, agent
+        assert "test_empty_cart_total" not in text, agent
+        assert "cart.py" in text, agent
         assert "context_handoff" not in text or agent == "claude"
     claude_text = expected["claude"].read_text()
     assert claude_text.startswith(original_claude_md)  # user rules untouched, block appended
@@ -150,7 +158,7 @@ def test_full_workflow(project: Path) -> None:
     # bookkeeping: handoffs table and last_handoff
     last = state(repo)["last_handoff"]
     assert isinstance(last, dict) and last["to"] == "generic" and last["method"] == "deterministic"
-    conn = sqlite3.connect(repo / ".context" / "state.db")
+    conn = sqlite3.connect(repo / ".contextbridge" / "state.db")
     try:
         db = conn.execute("SELECT to_agent, written_path FROM handoffs").fetchall()
     finally:
@@ -180,7 +188,7 @@ def test_exit_codes(git_repo: Path, tmp_path: Path) -> None:
     cb(git_repo, "handoff", "--dry-run", expect=2)
     cb(git_repo, "init", "--no-hooks")
     cb(git_repo, "handoff", "--from", "claude", "--to", "gemini", expect=1)  # unknown agent
-    cb(git_repo, "handoff", "--to", "cursor", expect=1)  # missing --from
+    cb(git_repo, "handoff", "--to", "cursor")  # source defaults automatically
     cb(git_repo, "log", "", expect=1)
     cb(git_repo, "clear", "--session", "--all", expect=1)
 

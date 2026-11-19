@@ -10,6 +10,7 @@ import typer
 from typer.testing import CliRunner
 
 from contextbridge.main import app
+from contextbridge.storage.db import SCHEMA_VERSION
 
 runner = CliRunner()
 
@@ -20,7 +21,7 @@ def cb(*args: str) -> tuple[int, str]:
 
 
 def _decisions(repo: Path) -> list[tuple[str, str]]:
-    conn = sqlite3.connect(repo / ".context" / "state.db")
+    conn = sqlite3.connect(repo / ".contextbridge" / "state.db")
     try:
         return conn.execute("SELECT content, tag FROM decision_logs ORDER BY rowid").fetchall()
     finally:
@@ -30,8 +31,8 @@ def _decisions(repo: Path) -> list[tuple[str, str]]:
 def test_init_creates_workspace(git_repo: Path) -> None:
     code, out = cb("init")
     assert code == 0, out
-    assert "Database schema at v2" in out
-    ctx = git_repo / ".context"
+    assert f"Database schema at v{SCHEMA_VERSION}" in out
+    ctx = git_repo / ".contextbridge"
     assert (ctx / "state.db").is_file()
     assert (ctx / "config.json").is_file()
     state = json.loads((ctx / "state.json").read_text())
@@ -39,30 +40,30 @@ def test_init_creates_workspace(git_repo: Path) -> None:
     assert state["project_name"] == "project"
     assert state["active_branch"] == "main"
     assert state["active_session_id"].startswith("sess_")
-    assert ".context/" in (git_repo / ".gitignore").read_text().splitlines()
+    assert ".contextbridge/" in (git_repo / ".gitignore").read_text().splitlines()
 
 
 def test_init_twice_is_safe(git_repo: Path) -> None:
     assert cb("init")[0] == 0
-    state1 = json.loads((git_repo / ".context" / "state.json").read_text())
+    state1 = json.loads((git_repo / ".contextbridge" / "state.json").read_text())
     assert cb("log", "keep me")[0] == 0
 
     code, out = cb("init")
     assert code == 0, out
     assert "Already initialized" in out
     assert "Database schema" not in out  # nothing to migrate the second time
-    state2 = json.loads((git_repo / ".context" / "state.json").read_text())
+    state2 = json.loads((git_repo / ".contextbridge" / "state.json").read_text())
     assert state2["active_session_id"] == state1["active_session_id"]
-    assert (git_repo / ".gitignore").read_text().count(".context") == 1
+    assert (git_repo / ".gitignore").read_text().count(".contextbridge") == 1
     assert _decisions(git_repo) == [("keep me", "note")]
 
 
 def test_context_dir_is_gitignored(git_repo: Path) -> None:
     (git_repo / ".gitignore").write_text("node_modules")  # no trailing newline
     assert cb("init")[0] == 0
-    assert (git_repo / ".gitignore").read_text() == "node_modules\n.context/\n"
+    assert (git_repo / ".gitignore").read_text() == "node_modules\n.contextbridge/\n.context/\n"
     check = subprocess.run(
-        ["git", "-C", str(git_repo), "check-ignore", "-q", ".context/state.db"], check=False
+        ["git", "-C", str(git_repo), "check-ignore", "-q", ".contextbridge/state.db"], check=False
     )
     assert check.returncode == 0
     status = subprocess.run(
@@ -71,13 +72,13 @@ def test_context_dir_is_gitignored(git_repo: Path) -> None:
         text=True,
         check=True,
     ).stdout
-    assert ".context" not in status
+    assert ".contextbridge" not in status
 
 
 def test_existing_gitignore_entry_respected(git_repo: Path) -> None:
     (git_repo / ".gitignore").write_text("/.context\n")
     assert cb("init")[0] == 0
-    assert (git_repo / ".gitignore").read_text() == "/.context\n"
+    assert (git_repo / ".gitignore").read_text() == "/.context\n.contextbridge/\n"
 
 
 def test_init_from_subdirectory_uses_repo_root(
@@ -87,8 +88,8 @@ def test_init_from_subdirectory_uses_repo_root(
     sub.mkdir(parents=True)
     monkeypatch.chdir(sub)
     assert cb("init")[0] == 0
-    assert (git_repo / ".context" / "state.db").is_file()
-    assert not (sub / ".context").exists()
+    assert (git_repo / ".contextbridge" / "state.db").is_file()
+    assert not (sub / ".contextbridge").exists()
     # Commands find .context/ by walking up.
     assert cb("log", "from subdir")[0] == 0
     assert _decisions(git_repo) == [("from subdir", "note")]
@@ -103,7 +104,7 @@ def test_log_stores_sanitized_row_with_tag(git_repo: Path) -> None:
     assert "Redacted 1 secret" in out
     rows = _decisions(git_repo)
     assert rows == [("x leaked [REDACTED:aws_access_key]", "bug")]
-    log_text = (git_repo / ".context" / "cb.log").read_text()
+    log_text = (git_repo / ".contextbridge" / "cb.log").read_text()
     assert secret not in log_text
 
 
@@ -150,7 +151,7 @@ def test_init_outside_git_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.chdir(plain)
     code, out = cb("init")
     assert code == 0, out
-    state = json.loads((plain / ".context" / "state.json").read_text())
+    state = json.loads((plain / ".contextbridge" / "state.json").read_text())
     assert state["active_branch"] == "(no-branch)"
 
 
@@ -177,7 +178,7 @@ def test_status_empty_session(git_repo: Path) -> None:
 
 def test_invalid_config_is_env_error(git_repo: Path) -> None:
     cb("init")
-    (git_repo / ".context" / "config.json").write_text('{"llm": {"provider": "nope"}}')
+    (git_repo / ".contextbridge" / "config.json").write_text('{"llm": {"provider": "nope"}}')
     code, out = cb("init")
     assert code == 2
     assert "llm.provider" in out

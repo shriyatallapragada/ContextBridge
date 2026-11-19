@@ -1,6 +1,6 @@
 [project]
 name = "contextbridge"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local-first CLI that preserves project context across AI coding agents."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -9,16 +9,24 @@ dependencies = [
     "typer>=0.12",
     "rich>=13.7",
     "platformdirs>=4.2",
+    "pathspec>=0.12,<2",
     "tree-sitter>=0.23",
     "tree-sitter-language-pack>=0.13,<0.14",
     "tiktoken>=0.7",
-    "ollama>=0.3",
+    "httpx>=0.27",
+    "jsonschema>=4",
+    "keyring>=25",
 ]
 
 [project.optional-dependencies]
+api = ["fastapi>=0.115,<1", "uvicorn>=0.30,<1"]
+mcp = ["mcp>=1.9,<2"]
 vector = ["chromadb>=0.5"]
 cloud = ["openai>=1.30", "groq>=0.9"]
-gui = ["PySide6-Essentials>=6.12,<6.13"]
+gui = [
+    "pypdf>=6,<7",
+    "PySide6-Essentials>=6.12,<6.13",
+]
 build = ["pyinstaller>=6.22,<7"]
 dev = [
     "pytest>=8.0",
@@ -43,7 +51,7 @@ packages = ["contextbridge"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-extend-exclude = ["*.md"]
+extend-exclude = ["*.md", "frontend"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]

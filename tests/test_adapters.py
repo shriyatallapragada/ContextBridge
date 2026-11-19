@@ -33,11 +33,26 @@ PAYLOAD = "# ContextBridge handoff\n\n## Done\n- did the thing\n\n## Active file
 
 
 def test_registry_names_and_aliases() -> None:
-    assert valid_names() == ["aider", "claude", "claude-code", "cursor", "generic", "opencode"]
+    assert valid_names() == [
+        "aider",
+        "claude",
+        "claude-code",
+        "codex",
+        "cursor",
+        "generic",
+        "kiro",
+        "opencode",
+    ]
     assert resolve_name("Claude") == "claude"
     assert resolve_name(" claude-code ") == "claude"
     assert resolve_name("aider") == resolve_name("opencode") == "generic"
-    assert [a.name for a in all_adapters(Path("."))] == ["claude", "cursor", "generic"]
+    assert [a.name for a in all_adapters(Path("."))] == [
+        "claude",
+        "codex",
+        "cursor",
+        "generic",
+        "kiro",
+    ]
 
 
 def test_unknown_agent_lists_valid_names(tmp_path: Path) -> None:
@@ -45,13 +60,24 @@ def test_unknown_agent_lists_valid_names(tmp_path: Path) -> None:
         get_adapter("gemini", tmp_path)
     assert "gemini" in err.value.message
     assert err.value.hint is not None
-    for name in ("claude", "cursor", "generic", "aider", "claude-code", "opencode"):
+    for name in (
+        "claude",
+        "codex",
+        "cursor",
+        "generic",
+        "kiro",
+        "aider",
+        "claude-code",
+        "opencode",
+    ):
         assert name in err.value.hint
 
 
 def test_get_adapter_returns_matching_class(tmp_path: Path) -> None:
     assert isinstance(get_adapter("claude", tmp_path), ClaudeAdapter)
+    assert get_adapter("codex", tmp_path).relative_path == "AGENTS.md"
     assert isinstance(get_adapter("cursor", tmp_path), CursorAdapter)
+    assert get_adapter("kiro", tmp_path).relative_path == "AGENTS.md"
     assert isinstance(get_adapter("aider", tmp_path), GenericAdapter)
     assert get_adapter("generic", tmp_path, force=True).force
 

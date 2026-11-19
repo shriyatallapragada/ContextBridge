@@ -17,7 +17,7 @@ from contextbridge.storage.db import (
     utc_now,
 )
 
-ISO_UTC = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+ISO_UTC = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
 
 
 @pytest.fixture
@@ -154,13 +154,13 @@ def _v1_database(path: Path, *, with_test_runs: bool) -> None:
 
 
 @pytest.mark.parametrize("with_test_runs", [True, False])
-def test_migration_1_to_2(tmp_path: Path, with_test_runs: bool) -> None:
+def test_migration_1_to_latest(tmp_path: Path, with_test_runs: bool) -> None:
     path = tmp_path / "state.db"
     _v1_database(path, with_test_runs=with_test_runs)
     assert "test_runs" not in _MIGRATION_1
     with Database.open(path, migrate=False) as db:
-        assert db.migrate() == 1
-        assert db.schema_version == 2 == SCHEMA_VERSION
+        assert db.migrate() == SCHEMA_VERSION - 1
+        assert db.schema_version == SCHEMA_VERSION
         assert "test_runs" in _tables(db)
         s = db.create_session("main")
         assert db.add_test_run(s.id, "pytest", 0, passed=1).passed == 1
@@ -267,6 +267,7 @@ def test_delete_all_sessions_removes_handoffs_first(db: Database) -> None:
         "file_changes": 1,
         "test_runs": 1,
         "handoffs": 1,
+        "change_batches": 0,
     }
     deleted = db.delete_all_sessions()  # would violate the handoffs foreign key otherwise
     assert deleted["handoffs"] == 1 and deleted["sessions"] == 1

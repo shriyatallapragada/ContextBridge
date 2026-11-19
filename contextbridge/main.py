@@ -9,14 +9,21 @@ import typer
 from contextbridge import __version__
 from contextbridge.cli.clear_cmd import clear_command
 from contextbridge.cli.common import AppContext, console
+from contextbridge.cli.configure_cmd import configure_command
 from contextbridge.cli.gui_cmd import gui_command
 from contextbridge.cli.handoff_cmd import handoff_command
 from contextbridge.cli.hook_cmd import hook_app
+from contextbridge.cli.import_chat_cmd import import_chat_command
 from contextbridge.cli.init_cmd import init_command
 from contextbridge.cli.log_cmd import log_command
+from contextbridge.cli.mcp_cmd import mcp_command
+from contextbridge.cli.provider_cmd import provider_app
 from contextbridge.cli.run_cmd import run_cmd_command
 from contextbridge.cli.search_cmd import search_command
+from contextbridge.cli.serve_cmd import serve_command
 from contextbridge.cli.status_cmd import status_command
+from contextbridge.cli.summarize_cmd import summarize_command, todo_app
+from contextbridge.cli.watch_cmd import watch_command
 
 app = typer.Typer(
     name="cb",
@@ -53,10 +60,18 @@ def main(
 
 
 app.command("init")(init_command)
+app.command("configure")(configure_command)
+app.command("summarize")(summarize_command)
+app.command("serve")(serve_command)
+app.command("mcp")(mcp_command)
+app.add_typer(provider_app, name="provider")
+app.add_typer(todo_app, name="todo")
 app.command("log")(log_command)
 app.command("status")(status_command)
+app.command("watch")(watch_command)
 app.command("run", context_settings={"ignore_unknown_options": True})(run_cmd_command)
 app.command("handoff")(handoff_command)
+app.command("import-chat")(import_chat_command)
 app.command("search")(search_command)
 app.command("clear")(clear_command)
 app.command("gui")(gui_command)

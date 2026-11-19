@@ -80,6 +80,9 @@ class Shell:
 
 @pytest.fixture
 def shell(qapp: QApplication, tmp_path: Path) -> Iterator[Shell]:
+    from contextbridge.config import global_config_path, save_config
+
+    save_config({"llm": {"setup_complete": True}}, global_config_path())
     settings_path = tmp_path / "settings.ini"
     window = MainWindow(
         QSettings(str(settings_path), QSettings.Format.IniFormat), restore_last=False
@@ -115,7 +118,7 @@ def ready(shell: Shell, project: Path) -> Shell:
 
 
 def db(project: Path, sql: str) -> list[tuple[Any, ...]]:
-    conn = sqlite3.connect(project / ".context" / "state.db")
+    conn = sqlite3.connect(project / ".contextbridge" / "state.db")
     try:
         return conn.execute(sql).fetchall()
     finally:
@@ -172,16 +175,16 @@ def test_opening_a_project_offers_one_click_setup(shell: Shell, project: Path) -
     assert shell.window.project_name.text() == project.name
     home = shell.page("home")
     assert has_button(home, "Set up this project")
-    assert not (project / ".context").exists()  # nothing happens until you click
+    assert not (project / ".contextbridge").exists()  # nothing happens until you click
 
 
 def test_setup_creates_workspace_and_installs_the_hook(shell: Shell, project: Path) -> None:
     shell.open(project)
     find_button(shell.page("home"), "Set up this project").click()
     shell.settle()
-    assert (project / ".context" / "state.db").is_file()
+    assert (project / ".contextbridge" / "state.db").is_file()
     assert "contextbridge:start" not in (project / ".gitignore").read_text()
-    assert ".context/" in (project / ".gitignore").read_text()
+    assert ".contextbridge/" in (project / ".gitignore").read_text()
     assert "# >>> contextbridge >>>" in (project / ".git" / "hooks" / "post-commit").read_text()
     home = shell.page("home")
     assert has_button(home, "Hand off to another assistant")
@@ -195,7 +198,7 @@ def test_setup_can_skip_the_hook(shell: Shell, project: Path) -> None:
     home.hook_checkbox.setChecked(False)
     find_button(home, "Set up this project").click()
     shell.settle()
-    assert (project / ".context").is_dir()
+    assert (project / ".contextbridge").is_dir()
     assert not (project / ".git" / "hooks" / "post-commit").exists()
 
 
@@ -207,7 +210,7 @@ def test_setup_in_a_folder_without_git(shell: Shell, tmp_path: Path) -> None:
     assert home.hook_checkbox is not None and not home.hook_checkbox.isEnabled()
     find_button(home, "Set up this project").click()
     shell.settle()
-    assert (folder / ".context" / "state.db").is_file()
+    assert (folder / ".contextbridge" / "state.db").is_file()
     assert not shell.dialogs  # no error for a folder that isn't a git repo
 
 
@@ -443,7 +446,7 @@ def test_full_handoff_flow(ready: Shell, project: Path, agent: str, relative: st
     assert relative in handoff.done_text.text()
     rows = db(project, "SELECT to_agent, written_path FROM handoffs")
     assert rows == [(agent, relative)]
-    state = json.loads((project / ".context" / "state.json").read_text())
+    state = json.loads((project / ".contextbridge" / "state.json").read_text())
     assert state["last_handoff"]["to"] == agent
     home = ready.page("home")
     assert any("Last handoff" in lab.text() for lab in home.findChildren(QLabel))
@@ -561,12 +564,14 @@ def test_last_handoff_target_is_preselected(ready: Shell) -> None:
 
 def test_ai_choice_is_saved_and_used(ready: Shell, project: Path) -> None:
     settings = ready.page("settings")
-    assert settings.local_radio.isChecked() and settings.model_row.isVisibleTo(settings)
-    settings.off_radio.setChecked(True)
+    assert settings.provider_form.off_radio.isChecked()
+    settings.provider_form.local_radio.setChecked(True)
+    settings.provider_form.off_radio.setChecked(True)
+    settings.provider_form.save_button.click()
     ready.settle()
-    config = json.loads((project / ".context" / "config.json").read_text())
+    config = json.loads((project / ".contextbridge" / "config.json").read_text())
     assert config["llm"]["provider"] == "none"
-    assert not settings.model_row.isVisibleTo(settings)
+    assert not settings.provider_form.fields.isVisibleTo(settings)
     handoff = ready.page("handoff")
     handoff.choice_cards["claude"].click()
     find_button(handoff, "Preview the summary").click()
@@ -574,42 +579,47 @@ def test_ai_choice_is_saved_and_used(ready: Shell, project: Path) -> None:
     assert "No AI was needed" in handoff.preview_how.text()
 
 
-def test_smart_mode_without_ollama_falls_back_quietly(ready: Shell) -> None:
+def test_local_model_selection_keeps_handoff_polishing_opt_in(ready: Shell) -> None:
+    ready.window.service.save_ai_settings("local")
     handoff = ready.page("handoff")
     handoff.choice_cards["claude"].click()
     find_button(handoff, "Preview the summary").click()
     ready.settle()
-    assert "wasn't reachable" in handoff.preview_how.text()
+    assert "No AI was needed" in handoff.preview_how.text()
     assert not ready.dialogs
 
 
 def test_model_name_is_saved(ready: Shell, project: Path) -> None:
     settings = ready.page("settings")
-    settings.model_edit.setText("llama3:8b")
-    settings.model_edit.editingFinished.emit()
+    settings.provider_form.local_radio.setChecked(True)
+    settings.provider_form.model.setText("llama3:8b")
+    settings.provider_form.save_button.click()
     ready.settle()
     assert (
-        json.loads((project / ".context" / "config.json").read_text())["llm"]["model"]
+        json.loads((project / ".contextbridge" / "config.json").read_text())["llm"]["model"]
         == "llama3:8b"
     )
 
 
 def test_check_connection_reports_in_plain_words(ready: Shell) -> None:
     settings = ready.page("settings")
+    settings.provider_form.local_radio.setChecked(True)
     find_button(settings, "Check connection").click()
     ready.settle()
-    assert settings.ai_message.isVisibleTo(settings)
-    assert "isn't running" in settings.ai_message._text.text()
+    assert settings.provider_form.message.isVisibleTo(settings)
+    assert "isn't running" in settings.provider_form.message.text()
     assert find_button(settings, "Check connection").isEnabled()
 
 
 def test_cloud_setup_is_shown_read_only(ready: Shell, project: Path) -> None:
-    (project / ".context" / "config.json").write_text(json.dumps({"llm": {"provider": "groq"}}))
+    (project / ".contextbridge" / "config.json").write_text(
+        json.dumps({"llm": {"provider": "groq"}})
+    )
     ready.window.refresh()
     ready.settle()
     settings = ready.page("settings")
-    assert settings.cloud_notice.isVisibleTo(settings)
-    assert not settings.local_radio.isVisibleTo(settings)
+    assert settings.provider_form.api_radio.isChecked()
+    assert settings.provider_form.endpoint.text() == "https://api.groq.com/openai/v1"
 
 
 def test_commit_recording_toggle(ready: Shell, project: Path) -> None:
@@ -642,7 +652,9 @@ def test_existing_hook_that_cannot_be_extended_is_explained(ready: Shell, projec
 
 
 def test_start_a_new_work_session(ready: Shell, project: Path) -> None:
-    before = json.loads((project / ".context" / "state.json").read_text())["active_session_id"]
+    before = json.loads((project / ".contextbridge" / "state.json").read_text())[
+        "active_session_id"
+    ]
     settings = ready.page("settings")
     find_button(settings, "Start a new work session").click()
     ready.settle()
@@ -803,3 +815,318 @@ def test_window_closes_cleanly_with_work_running(
     shell.window.close()  # closing while the setup task may still be running must not crash
     shell.window.runner.wait(5000)
     pump(qapp, 0.05)
+
+
+def test_chat_bridge_without_project(shell: Shell) -> None:
+    shell.window.go("chat")
+    page = shell.window.page_map["chat"]
+    assert shell.window.service is None
+    page.transcript.setPlainText("User: Plan a trip.\nAssistant: What budget?")
+    page.goal.setText("Plan a weekend trip")
+    page.pinned.setPlainText("Budget is 200")
+    find_button(page, "Prepare handoff").click()
+    assert "Budget is 200" in page.preview.toPlainText()
+    assert "weekend trip" in page.preview.toPlainText()
+    find_button(page, "Clear chat and preview").click()
+    assert not page.transcript.toPlainText() and not page.preview.toPlainText()
+
+
+def test_project_guide_reads_documentation(ready: Shell, project: Path) -> None:
+    (project / "README.md").write_text("# Example\nA project for tracking books.")
+    page = ready.page("guide")
+    find_button(page, "Refresh guide").click()
+    ready.settle()
+    assert "tracking books" in page.views["What it does"].toPlainText()
+    assert "rule-based suggestions" in page.views["Suggestions"].toPlainText()
+
+
+def test_guide_renders_markdown_and_workflow(ready: Shell, project: Path) -> None:
+    (project / "README.md").write_text(
+        "# Readable heading\n\n**Bold text**\n\n| Name | Role |\n| --- | --- |\n| UI | Display |"
+    )
+    page = ready.page("guide")
+    find_button(page, "Refresh guide").click()
+    ready.settle()
+    view = page.views["What it does"]
+    assert "# Readable heading" not in view.toPlainText()
+    assert "<table" in view.toHtml()
+    page.diagram.mode.setCurrentIndex(1)
+    ready.settle()
+    assert page.diagram.data["view"] == "module"
+    assert page.diagram.items
+    node = page.diagram.data["nodes"][0]
+    page.diagram.items[node["id"]].setSelected(True)
+    assert node["purpose"] in page.diagram.details.toPlainText()
+
+
+def test_guide_rejects_documents_outside_project(ready: Shell, tmp_path: Path) -> None:
+    outside = tmp_path / "private.md"
+    outside.write_text("Do not load this")
+    page = ready.page("guide")
+    page._read_document(outside)
+    assert "inside this project" in page.status.text()
+    assert "Do not load this" not in page.views["What it does"].toPlainText()
+
+
+def test_guide_flowcharts_visible_and_refresh_preserves_selection(ready: Shell) -> None:
+    ready.window.resize(880, 600)
+    page = ready.page("guide")
+    ready.settle()
+    assert len(page.section_buttons) == 6
+    for control in page.section_buttons.values():
+        assert control.isVisibleTo(page)
+        assert control.width() > 100
+    page.section_buttons["Flowcharts"].click()
+    assert page.tabs.currentWidget() is page.diagram
+    assert page.diagram.mode.currentIndex() == 0
+    page.diagram.mode.setCurrentIndex(2)
+    ready.settle()
+    find_button(page, "Refresh guide").click()
+    ready.settle()
+    assert page.tabs.currentWidget() is page.diagram
+    assert page.section_buttons["Flowcharts"].isChecked()
+    assert page.diagram.mode.currentIndex() == 2
+    assert page.diagram.data["view"] == "flow"
+    assert not page.tabs.tabBar().isVisible()
+
+
+def test_chat_import_pdf_export_and_cancel_inflight(
+    shell: Shell, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextbridge.chat_files import read_chat_file
+    from contextbridge.gui.chat_pdf import save_chat_pdf
+
+    source = tmp_path / "source.pdf"
+    save_chat_pdf(source, "# Conversation\n\nUser: Keep the deadline on Friday.")
+    page = shell.page("chat")
+    monkeypatch.setattr(
+        "contextbridge.gui.pages.chat.QFileDialog.getOpenFileName",
+        lambda *a, **kw: (str(source), "PDF (*.pdf)"),
+    )
+    page._import()
+    shell.settle()
+    assert "deadline on Friday" in page.transcript.toPlainText()
+    page.goal.setText("Continue planning")
+    page._prepare()
+    output = tmp_path / "handoff.pdf"
+    monkeypatch.setattr(
+        "contextbridge.gui.pages.chat.QFileDialog.getSaveFileName",
+        lambda *a, **kw: (str(output), "PDF (*.pdf)"),
+    )
+    find_button(page, "Save PDF…").click()
+    assert "Continue planning" in read_chat_file(output).text
+    page._import()
+    page._clear()
+    shell.settle()
+    assert not page.transcript.toPlainText()
+    assert page.import_button.isEnabled()
+
+
+def test_explainer_views_node_details_drilldown_and_mermaid(
+    qapp: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextbridge.gui.diagrams import DiagramPanel
+    from contextbridge.project_map import scan_project, validate_mermaid
+
+    (tmp_path / "main.py").write_text(
+        '"""Start a sample request."""\nfrom storage import save\ndef main(): return save()\n'
+    )
+    (tmp_path / "storage.py").write_text('"""Save sample results."""\ndef save(): return True\n')
+    model = scan_project(tmp_path)
+    storage = next(
+        n for n in model.graph_nodes.values() if n.path == "storage.py" and n.kind == "module"
+    )
+    storage.ai_explanation = {"label": "AI-written", "text": "This part saves the sample result."}
+    copied: list[str] = []
+    monkeypatch.setattr("contextbridge.gui.diagrams.copy_text", copied.append)
+    panel = DiagramPanel()
+    try:
+        panel.set_model(model)
+        assert panel.data["view"] == "overview"
+        panel._open_part()
+        assert panel.data["view"] == "module"
+        panel.module.setCurrentIndex(panel.module.findData("storage.py"))
+        panel.items[storage.id].setSelected(True)
+        details = panel.details.toPlainText()
+        assert "AI-written: This part saves" in details
+        assert "Used by: main.py" in details and "Save sample results" in details
+        panel.mode.setCurrentIndex(2)
+        assert panel.data["view"] == "flow"
+        assert panel.arrows and all(arrow.isVisible() for _, _, arrow in panel.arrows)
+        panel.copy_button.click()
+        assert len(copied) == 1
+        validate_mermaid(copied[0])
+        assert "Copied" in panel.caption.text()
+        panel.mode.setCurrentIndex(0)
+        assert panel.data["view"] == "overview"
+    finally:
+        panel.close()
+        panel.deleteLater()
+        pump(qapp)
+
+
+def test_flutter_diagram_cards_theme_and_readable_layout(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    import shutil
+
+    from contextbridge.gui import theme
+    from contextbridge.gui.diagrams import DiagramPanel
+    from contextbridge.project_map import scan_project
+
+    root = tmp_path / "flutter"
+    shutil.copytree(Path(__file__).parent / "fixtures/flutter_project", root)
+    panel = DiagramPanel()
+    panel.resize(850, 1000)
+    panel.show()
+    try:
+        panel.set_model(scan_project(root))
+        pump(qapp)
+        assert len(panel.items) == 5
+        first_box = next(iter(panel.items.values()))
+        first_visible = panel.canvas.mapFromScene(first_box.rect().topLeft())
+        assert first_visible.x() >= 0 and first_visible.y() >= 0
+        assert panel.canvas.backgroundBrush().color().name() == theme.BG.lower()
+        assert panel.canvas.transform().m11() >= 0.85
+        fit = find_button(panel, "Fit")
+        assert fit.minimumWidth() >= 76
+        for node in panel.data["nodes"]:
+            box = panel.items[node["id"]]
+            assert not box.toolTip()
+            children = [child for child in box.childItems() if hasattr(child, "toPlainText")]
+            assert len(children) == 3
+            bounds = [child.mapRectToParent(child.boundingRect()) for child in children]
+            assert all(box.rect().contains(rect) for rect in bounds)
+            assert not any(a.intersects(b) for i, a in enumerate(bounds) for b in bounds[i + 1 :])
+            texts = [child.toPlainText() for child in children]
+            assert any(str(node["file_count"]) + " file" in text for text in texts)
+        panel.mode.setCurrentIndex(1)
+        panel.module.setCurrentIndex(panel.module.findData("docs/widgets/calendar.js"))
+        assert "Not explained yet" in panel.details.toPlainText()
+        assert "Connections not detected" in panel.details.toPlainText()
+        assert "Uses:" not in panel.details.toPlainText()
+        assert "Dart/Flutter" in panel.support.text()
+        panel.mode.setCurrentIndex(2)
+        assert panel.items and panel.module.currentData() == "lib/main.dart"
+    finally:
+        panel.close()
+        panel.deleteLater()
+        pump(qapp)
+
+
+def test_explain_button_requires_privacy_confirmation(
+    ready: Shell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    page = ready.page("guide")
+    page._load()
+    ready.settle()
+    page.diagram.mode.setCurrentIndex(1)
+    ready.settle()
+    service = page.service
+    calls: list[str] = []
+    notices: list[str] = []
+    monkeypatch.setattr(
+        type(service),
+        "file_explanation_notice",
+        lambda self, path: "Send only " + path + " to hosted provider?",
+    )
+    monkeypatch.setattr(
+        type(service),
+        "explain_file",
+        lambda self, path, **kw: calls.append(path) or "This file keeps cart data.",
+    )
+
+    def cancel(_parent: Any, _title: str, notice: str, *_args: Any) -> Any:
+        notices.append(notice)
+        return QMessageBox.StandardButton.Cancel
+
+    monkeypatch.setattr("contextbridge.gui.pages.guide.QMessageBox.question", cancel)
+    page.diagram.explain_button.click()
+    ready.settle()
+    assert notices and not calls
+    monkeypatch.setattr(
+        "contextbridge.gui.pages.guide.QMessageBox.question",
+        lambda *_: QMessageBox.StandardButton.Yes,
+    )
+    page.diagram.explain_button.click()
+    ready.settle()
+    assert calls == ["cart.py"]
+    assert "AI-written explanation cached" in page.status.text()
+
+
+def test_project_explain_budget_confirmation_progress_and_resume(
+    ready: Shell, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from PySide6.QtWidgets import QDialog, QSpinBox
+
+    page = ready.page("guide")
+    service = page.service
+    calls: list[tuple[int, int, Any]] = []
+    monkeypatch.setattr(
+        type(service),
+        "project_explanation_notice",
+        lambda self, requests, tokens: f"Hosted provider. {requests} requests / {tokens} tokens.",
+    )
+
+    def run(self: Any, **kwargs: Any) -> str:
+        calls.append((kwargs["max_requests"], kwargs["token_budget"], kwargs["component"]))
+        kwargs["notify"]("File 1/12: app/admin/page.tsx")
+        return "Stopped: rate limit hit; progress cached. Retry in 7s."
+
+    monkeypatch.setattr(type(service), "explain_project", run)
+    monkeypatch.setattr(
+        "contextbridge.gui.pages.guide.QDialog.exec", lambda self: QDialog.DialogCode.Rejected
+    )
+    page.explain_project_button.click()
+    ready.settle()
+    assert not calls
+
+    def confirm(dialog: Any) -> Any:
+        dialog.findChild(QSpinBox, "ExplanationRequestBudget").setValue(30)
+        dialog.findChild(QSpinBox, "ExplanationTokenBudget").setValue(60000)
+        assert any(
+            "30 requests / 60000 tokens" in control.text()
+            for control in dialog.findChildren(QLabel)
+        )
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr("contextbridge.gui.pages.guide.QDialog.exec", confirm)
+    page.explain_project_button.click()
+    ready.settle()
+    assert calls == [(30, 60000, None)]
+    assert "Stopped: rate limit" in page.status.text()
+    assert page.explain_project_button.isEnabled()
+    page.explain_project_button.click()
+    ready.settle()
+    assert len(calls) == 2
+
+
+def test_unexplained_component_has_inline_explain_button(
+    qapp: QApplication, tmp_path: Path
+) -> None:
+    from PySide6.QtWidgets import QGraphicsProxyWidget
+
+    from contextbridge.gui.diagrams import DiagramPanel
+    from contextbridge.project_map import scan_project
+
+    (tmp_path / "root.ts").write_text("export const value = 1;\n")
+    panel = DiagramPanel()
+    requests: list[str] = []
+    panel.explain_component = lambda group, done: requests.append(group)
+    try:
+        panel.set_model(scan_project(tmp_path))
+        node = panel.data["nodes"][0]
+        assert node["label"] == "Project root" and node["purpose"] == "Not explained yet"
+        proxies = [
+            child
+            for child in panel.items[node["id"]].childItems()
+            if isinstance(child, QGraphicsProxyWidget)
+        ]
+        assert len(proxies) == 1
+        assert proxies[0].widget().text() == "Explain"
+        proxies[0].widget().click()
+        assert requests == ["."]
+    finally:
+        panel.close()
+        panel.deleteLater()
+        pump(qapp)

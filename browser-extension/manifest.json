@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "ContextBridge Chat Export",
+  "version": "0.1.0",
+  "description": "Review and export selected chat text for a local ContextBridge handoff.",
+  "permissions": ["activeTab", "scripting", "downloads"],
+  "action": {"default_popup": "popup.html", "default_title": "Export selected chat text"}
+}
