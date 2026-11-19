@@ -511,14 +511,22 @@ class Database:
             source=clean_source,
         )
 
-    def list_decisions(self, session_id: str, *, limit: int | None = None) -> list[Decision]:
-        sql = (
-            "SELECT * FROM decision_logs WHERE session_id = ? ORDER BY created_at DESC, rowid DESC"
-        )
-        params: tuple[object, ...] = (session_id,)
+    def list_decisions(
+        self, session_id: str, *, limit: int | None = None, tag: str | None = None
+    ) -> list[Decision]:
+        sql = "SELECT * FROM decision_logs WHERE session_id = ?"
+        params: list[object] = [session_id]
+        if tag is not None:
+            if tag not in DECISION_TAGS:
+                raise UserError(
+                    f"Invalid tag {tag!r}; expected one of: {', '.join(DECISION_TAGS)}."
+                )
+            sql += " AND tag=?"
+            params.append(tag)
+        sql += " ORDER BY created_at DESC, rowid DESC"
         if limit is not None:
             sql += " LIMIT ?"
-            params = (session_id, limit)
+            params.append(limit)
         return [_row_to_decision(r) for r in self.conn.execute(sql, params).fetchall()]
 
     def count_decisions_by_tag(self, session_id: str) -> dict[str, int]:
@@ -1065,6 +1073,15 @@ class Database:
             (session_id,),
         ).fetchone()
         return _row_to_test_run(row) if row else None
+
+    def test_runs(self, session_id: str, *, limit: int = 20) -> list[TestRun]:
+        """Recorded runs of one session, newest first (bounded for history views)."""
+        rows = self.conn.execute(
+            "SELECT * FROM test_runs WHERE session_id = ? ORDER BY timestamp DESC, rowid DESC "
+            "LIMIT ?",
+            (session_id, max(int(limit), 1)),
+        ).fetchall()
+        return [_row_to_test_run(r) for r in rows]
 
 
 @dataclass(frozen=True)

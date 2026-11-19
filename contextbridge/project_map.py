@@ -35,6 +35,8 @@ SKIP = {
     "keys",
 }
 
+NO_ENTRY_REASON = "No entry points detected. Pick a starting file to explore its detected imports."
+
 
 @dataclass
 class ProjectMap:
@@ -871,10 +873,20 @@ def graph_view(
         ):
             counted[source_id, destination_id, e.kind] += 1
     capped_edges = sorted(counted)[: min(limit * 6, 240)]
+    node_dicts = []
+    for node in displayed.values():
+        data = asdict(node)
+        # Component coverage: folders count explained members; a file/function/class
+        # node is explained only when it carries an AI-written explanation.
+        data["explained_count"] = (
+            node.explained_files if node.kind == "folder" else int(bool(node.ai_explanation))
+        )
+        node_dicts.append(data)
+    entry_paths = [model.graph_nodes[i].path for i in model.entrypoints]
     result = {
         "view": view,
         "module": module,
-        "nodes": [asdict(n) for n in displayed.values()],
+        "nodes": node_dicts,
         "edges": [asdict(GraphEdge(*key, count=counted[key])) for key in capped_edges],
         "meta": {
             "scanned_files": model.scanned,
@@ -887,7 +899,9 @@ def graph_view(
             "limited": model.limited or bool(omitted) or len(counted) > len(capped_edges),
             "unresolved_calls": model.unresolved_calls,
             "available_modules": sorted(file_nodes),
-            "entrypoints": [model.graph_nodes[i].path for i in model.entrypoints],
+            "entrypoints": entry_paths,
+            "entry_points": entry_paths,
+            "no_entry_reason": ("" if entry_paths else NO_ENTRY_REASON),
             "file_count": len(file_nodes),
             "import_support": (
                 "Python; Dart/Flutter (package: and relative); "
@@ -902,7 +916,7 @@ def graph_view(
             ),
             "detected_languages": model.detected_languages,
             "flow_notice": (
-                "No entry points detected. Pick a starting file to explore its detected imports."
+                NO_ENTRY_REASON
                 if not model.entrypoints
                 else "Possible paths from a starting file, not a running request."
             ),

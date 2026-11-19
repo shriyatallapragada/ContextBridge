@@ -22,6 +22,8 @@ from contextbridge.errors import UserError
 from contextbridge.service import ProjectService
 from contextbridge.storage.db import DECISION_TAGS, Decision, utc_now
 from contextbridge.storage.workspace import detect_branch
+from contextbridge.synthesis.context_builder import logged_goal
+from contextbridge.synthesis.facts import project_facts
 
 if TYPE_CHECKING:
     from contextbridge.core.git_history import CommitRecord
@@ -55,6 +57,28 @@ def set_intent(service: ProjectService, text: str) -> dict[str, Any]:
     with service.ws.open_db() as db:
         updated_at = db.set_intent(text)
     return {"north_star": text.strip(), "updated_at": updated_at}
+
+
+# ----- notes (decisions of every tag) ----------------------------------
+
+
+def list_notes(
+    service: ProjectService, *, tag: str | None = None, limit: int = 200
+) -> dict[str, Any]:
+    """Logged notes of the active session, newest first, with per-tag counts."""
+    if tag is not None and tag not in DECISION_TAGS:
+        raise UserError(f"Invalid tag {tag!r}; expected one of: {', '.join(DECISION_TAGS)}.")
+    with service.ws.open_db() as db:
+        session, _ = service.ws.active_session(db)
+        notes = db.list_decisions(session.id, limit=limit, tag=tag)
+        counts = db.count_decisions_by_tag(session.id)
+    return {
+        "notes": [
+            {"id": d.id, "content": d.content, "tag": d.tag, "created_at": d.created_at}
+            for d in notes
+        ],
+        "counts": counts,
+    }
 
 
 # ----- tasks -------------------------------------------------------------------
@@ -195,6 +219,13 @@ def overview(service: ProjectService, *, refresh: bool = False) -> dict[str, Any
     """Everything the Overview tab needs, gathered deterministically in one call."""
     intent = get_intent(service)
     with service.ws.open_db() as db:
+        goal = intent["north_star"]
+        if not goal:
+            session, _ = service.ws.active_session(db)
+            goal = (
+                logged_goal(db.list_decisions(session.id, tag="note"))
+                or project_facts(service.root)[0]
+            )
         counts = db.task_counts()
         commits = load_git_history(db, service.root, limit=DEFAULT_LIMIT, refresh=refresh)
     return {
@@ -204,6 +235,7 @@ def overview(service: ProjectService, *, refresh: bool = False) -> dict[str, Any
         "initialized": service.is_initialized(),
         "generated_at": utc_now(),
         "north_star": intent["north_star"],
+        "project_goal": goal or None,
         "north_star_updated_at": intent["updated_at"],
         "tasks": counts,
         "commits": [c.to_dict() for c in commits],

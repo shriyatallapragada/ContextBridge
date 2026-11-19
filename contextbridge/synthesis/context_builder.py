@@ -115,6 +115,9 @@ class SessionContext:
     summary_files: list[str] = field(default_factory=list)
     parts: list[str] = field(default_factory=list)
     older_work: list[str] = field(default_factory=list)
+    # Explicit project intent (the project_intent row): the canonical handoff Goal
+    # when set; empty means fall back to a Goal: note, then README/manifest facts.
+    explicit_goal: str = ""
 
     def __post_init__(self) -> None:
         self.raw_tokens = count_tokens(render_items(self.items))
@@ -377,6 +380,20 @@ def _build_items(
     return items
 
 
+def logged_goal(decisions: list[Decision]) -> str:
+    """Newest usable Goal note; superseded and dismissed items are historical."""
+    for decision in decisions:
+        if (
+            decision.tag == "note"
+            and decision.status in {"open", "resolved"}
+            and decision.content.lower().startswith("goal:")
+        ):
+            goal = decision.content.partition(":")[2].strip()
+            if goal:
+                return goal
+    return ""
+
+
 def build_context(
     db: Database,
     session: Session,
@@ -420,6 +437,8 @@ def build_context(
     test_run = db.last_test_run(session.id)
     root = root or (observer.root if observer is not None else None)
     goal, stack = project_facts(root) if root else ("", "")
+    intent = db.get_intent()
+    explicit_goal = intent[0].strip() if intent else ""
     stale = False
     if test_run is not None:
         tested = parse_utc(test_run.timestamp).timestamp()
@@ -444,7 +463,8 @@ def build_context(
         omitted_files=omitted,
         test_run=test_run,
         items=items,
-        goal=goal,
+        goal=explicit_goal or logged_goal(decisions) or goal,
+        explicit_goal=explicit_goal,
         stack=stack,
         tests_stale=stale,
         test_files_changed=sum(is_test(item.path) for item in all_files),

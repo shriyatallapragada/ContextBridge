@@ -103,8 +103,10 @@ cb mcp        # stdio MCP server for coding agents
 Build it once, then serve:
 
 ```bash
-cd frontend && npm install && npm run build     # writes frontend/dist
-cb serve                                        # prints http://127.0.0.1:8765/ui/#token=...
+uv sync --extra api
+npm --prefix frontend ci
+npm --prefix frontend run build
+uv run cb --repo /path/to/project serve
 ```
 
 The URL already carries the session token in its fragment, so opening it is enough —
@@ -112,13 +114,16 @@ browsers never send fragments to the server, and every `/v1/*` call still authen
 with `Authorization: Bearer <token>`. Without a built dashboard, `cb serve` prints the
 token on its own line instead.
 
-Three tabs:
+The sidebar links to Overview, Notes and tasks, Changes and tests, Hand off,
+Project guide, Chat bridge and Settings. The explicit Project goal is saved in
+SQLite and takes precedence in handoffs; otherwise a logged `Goal:` note or
+manifest/README description can supply the Goal. To switch projects, stop the
+server and restart it with the new project directory.
 
-| Tab | Contents |
-|---|---|
-| **Overview & Timeline** | The persistent North Star intent (one row in SQLite) and the last 15 commits, read from `git log` + `git diff --stat` when the server boots — no manual command |
-| **To-Do & Tasks** | A checklist that writes straight to SQLite, plus the Chat Bridge box: paste a transcript and it becomes tasks using fixed parsing rules (checkboxes, `TODO:`/`ACTION:` lines, bullets under a *Next steps* heading) |
-| **Architecture Map** | React Flow rendering of the same deterministic AST graph JSON the desktop app uses (`GET /v1/graph`), with a Mermaid copy button |
+Start offline; a model is not required for handoffs, chat transfer, or the
+architecture map. Hosted model requests are opt-in. Chat Bridge task previews
+do not write anything; **Save tasks** adds rows to SQLite, not Git commits.
+For selectable-text PDF import, also install the `gui` extra.
 
 | Endpoint | Purpose |
 |---|---|
@@ -129,7 +134,14 @@ Three tabs:
 | `POST /v1/chat-import` | `commit: false` previews transcript tasks, `true` stores them |
 | `GET /v1/graph`, `GET /v1/mermaid` | Deterministic import graph |
 
-The Vite dev server (`npm run dev`, port 5173) proxies `/v1` to `127.0.0.1:8765`.
+For development, keep the API running on the default port 8765. In a second
+terminal run `npm --prefix frontend run dev`, then open
+`http://localhost:5173/ui/#token=<session-token>` using the token printed by
+`cb serve`. Vite serves the UI and proxies `/v1` to `127.0.0.1:8765`.
+Run frontend component tests with `npm --prefix frontend test`.
+To test a fresh build in Chromium against the real server, run
+`cd frontend && npx playwright install chromium && npm run build && npm run test:browser`
+after installing the API extra above.
 
 ### MCP server
 

@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  applyEdgeChanges,
+  applyNodeChanges,
   Background,
   BackgroundVariant,
   Controls,
@@ -12,40 +14,108 @@ import {
 } from "@xyflow/react";
 import { apiRequest, apiText } from "../api.js";
 import { Badge, EmptyState, ErrorBanner, Spinner } from "./ui.jsx";
+import ExplainDialog from "./ExplainDialog.jsx";
 
 const VIEWS = [
-  { id: "overview", label: "Overview" },
-  { id: "module", label: "Module" },
-  { id: "flow", label: "Flow" },
+  { id: "overview", label: "Project overview" },
+  { id: "module", label: "Inside one file" },
+  { id: "flow", label: "How a request travels" },
 ];
 
 const KIND_TONES = {
-  folder: { box: "border-violet-700 bg-violet-950/70 text-violet-100", dot: "#8b5cf6" },
-  module: { box: "border-sky-700 bg-sky-950/70 text-sky-100", dot: "#38bdf8" },
-  file: { box: "border-zinc-600 bg-zinc-900 text-zinc-200", dot: "#a1a1aa" },
-  function: { box: "border-amber-700 bg-amber-950/70 text-amber-100", dot: "#f59e0b" },
-  class: { box: "border-emerald-700 bg-emerald-950/70 text-emerald-100", dot: "#34d399" },
-  collapsed: {
-    box: "border-dashed border-zinc-600 bg-zinc-950 text-zinc-400",
-    dot: "#52525b",
-  },
+  folder: { box: "border-accent bg-surface text-ink", dot: "#BF8B67" },
+  module: { box: "border-masala bg-surface text-ink", dot: "#9D5353" },
+  file: { box: "border-line bg-surface text-ink", dot: "#855656" },
+  function: { box: "border-ok bg-ok-bg text-ok", dot: "#2F6B4F" },
+  class: { box: "border-info bg-info-bg text-info", dot: "#4A5A8A" },
+  collapsed: { box: "border-dashed border-line bg-surface-alt text-ink-muted", dot: "#DBCB96" },
 };
 
+const KIND_BADGE_TONES = {
+  folder: "accent",
+  module: "primary",
+  file: "neutral",
+  function: "ok",
+  class: "info",
+  collapsed: "neutral",
+};
+
+const NODE_WIDTH = 250;
+
+function coverageText(node) {
+  const total = node.file_count ?? 1;
+  const explained = node.explained_files ?? 0;
+  if (node.kind !== "folder" || total <= 1) return null;
+  if (explained <= 0) return null;
+  if (explained >= total) return `all ${total} files explained`;
+  return `${explained} of ${total} files explained`;
+}
+
+function isUnexplained(node) {
+  return !node.purpose || node.purpose === "Not explained yet";
+}
+
+// Card contents are deliberately rich: name, explanation (or the honest
+// "Not explained yet"), AI provenance, file count, coverage and an Explain
+// action — no need to open the details panel first.
 function KindNode({ data, selected }) {
   const tone = KIND_TONES[data.kind] ?? KIND_TONES.file;
+  const coverage = data.coverage;
+  const needsExplain = data.unexplained;
+
   return (
     <div
-      className={`rounded-lg border px-3 py-2 shadow-xl ${tone.box} ${
-        selected ? "ring-2 ring-sky-400" : ""
+      className={`rounded-card border px-3 py-2.5 text-left shadow-card transition ${tone.box} ${
+        selected ? "border-chai" : "hover:border-accent"
       }`}
-      style={{ width: 200 }}
+      style={{
+        width: NODE_WIDTH,
+        background: "var(--surface)",
+        boxShadow: selected ? "0 0 0 3px var(--focus)" : undefined,
+      }}
       title={data.purpose || data.label}
     >
       <Handle type="target" position={Position.Left} />
-      <div className="truncate text-xs font-semibold" title={data.label}>
-        {data.label}
+      <div className="flex items-start justify-between gap-2">
+        <span className="min-w-0 flex-1 truncate text-base font-bold text-ink" title={data.label}>
+          {data.label}
+        </span>
+        {data.ai && (
+          <Badge tone="accent" symbol="✦">
+            AI-written
+          </Badge>
+        )}
       </div>
-      <div className="text-[10px] uppercase tracking-wide opacity-60">{data.kind}</div>
+      <div className="mt-0.5 text-sm uppercase tracking-wide text-ink-muted">{data.kind}</div>
+
+      <p className="mt-1.5 line-clamp-3 text-sm leading-snug text-ink-muted">
+        {data.purpose || "Not explained yet"}
+      </p>
+
+      {(data.kind === "folder" || coverage) && (
+        <div className="mt-1.5 flex flex-wrap gap-1.5 text-sm text-ink-muted">
+          {data.kind === "folder" && (
+            <Badge tone="neutral" symbol="▤">
+              {data.fileCount} {data.fileCount === 1 ? "file" : "files"}
+            </Badge>
+          )}
+          {coverage && <Badge tone="primary">{coverage}</Badge>}
+        </div>
+      )}
+
+      {needsExplain && data.onExplain && (
+        <button
+          type="button"
+          className="nodrag btn btn-secondary mt-2 w-full"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            data.onExplain();
+          }}
+        >
+          Explain
+        </button>
+      )}
       <Handle type="source" position={Position.Right} />
     </div>
   );
@@ -53,8 +123,8 @@ function KindNode({ data, selected }) {
 
 const nodeTypes = { kind: KindNode };
 
-const X_STEP = 260;
-const Y_STEP = 90;
+const X_STEP = 300;
+const Y_STEP = 194;
 const ROWS_PER_COLUMN = 7;
 const MAX_LAYER = 6;
 
@@ -128,12 +198,14 @@ function DetailList({ title, values, mono }) {
   if (!values || values.length === 0) return null;
   return (
     <div>
-      <h4 className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{title}</h4>
+      <h4 className="text-sm font-semibold" style={{ color: "var(--red-chai)" }}>
+        {title}
+      </h4>
       <ul className="mt-1.5 space-y-1">
         {values.slice(0, 20).map((value, index) => (
           <li
             key={`${value}-${index}`}
-            className={`break-words rounded-md bg-zinc-800/60 px-2 py-1 text-[11px] text-zinc-300 ${
+            className={`break-words rounded-control bg-surface-alt px-2 py-1 text-sm text-ink ${
               mono ? "font-mono" : ""
             }`}
           >
@@ -142,73 +214,85 @@ function DetailList({ title, values, mono }) {
         ))}
       </ul>
       {values.length > 20 && (
-        <p className="mt-1 text-[10px] text-zinc-600">+{values.length - 20} more</p>
+        <p className="mt-1 text-sm text-ink-muted">+{values.length - 20} more</p>
       )}
     </div>
   );
 }
 
-function NodeDetails({ node, onClose }) {
-  const tone = KIND_TONES[node.kind] ?? KIND_TONES.file;
+function NodeDetails({ node, onClose, onExplain }) {
+  const badgeTone = KIND_BADGE_TONES[node.kind] ?? "neutral";
   const ai = node.ai_explanation;
 
   return (
-    <aside className="thin-scroll w-full shrink-0 overflow-y-auto rounded-2xl border border-zinc-800 bg-zinc-900/70 p-4 lg:w-80 lg:max-h-[560px]">
+    <aside
+      className="thin-scroll w-full shrink-0 overflow-y-auto rounded-card border border-line bg-surface p-4 lg:max-h-[560px] lg:w-80"
+      aria-label={`Details for ${node.label}`}
+    >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <Badge className={tone.box}>{node.kind}</Badge>
-          <h3 className="mt-2 break-words text-sm font-semibold text-zinc-100">{node.label}</h3>
+          <Badge tone={badgeTone}>{node.kind}</Badge>
+          <h3 className="mt-2 break-words text-base font-bold text-ink">{node.label}</h3>
         </div>
         <button
           type="button"
           onClick={onClose}
           aria-label="Close details"
-          className="rounded-md border border-zinc-700 px-2 py-0.5 text-xs text-zinc-400 transition hover:border-zinc-500 hover:text-zinc-200"
+          className="btn btn-secondary shrink-0"
         >
           ✕
         </button>
       </div>
 
       {node.path && (
-        <p className="mt-2 break-all font-mono text-[11px] text-zinc-500">{node.path}</p>
+        <p className="mt-2 break-all font-mono text-sm text-ink-muted" title={node.path}>
+          {node.path}
+        </p>
       )}
 
       {node.purpose && (
         <div className="mt-3">
-          <h4 className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
+          <h4 className="text-sm font-semibold" style={{ color: "var(--red-chai)" }}>
             Purpose
           </h4>
-          <p className="mt-1.5 whitespace-pre-wrap text-xs leading-relaxed text-zinc-300">
+          <p className="mt-1.5 whitespace-pre-wrap text-base leading-relaxed text-ink">
             {node.purpose}
           </p>
         </div>
       )}
 
       {ai && ai.text && (
-        <div className="mt-3 rounded-xl border border-violet-800/60 bg-violet-950/30 p-3">
+        <div className="mt-3 rounded-card border border-accent bg-surface-alt p-3">
           <div className="flex items-center gap-2">
-            <h4 className="text-[11px] font-semibold uppercase tracking-wide text-violet-300">
-              AI explanation
+            <h4 className="text-sm font-semibold" style={{ color: "var(--red-chai)" }}>
+              Explanation
             </h4>
-            <Badge className="border-violet-700 bg-violet-950/70 text-violet-300">
+            <Badge tone="accent" symbol="✦">
               {ai.label ?? "AI-written"}
             </Badge>
           </div>
-          <p className="mt-1 text-[10px] text-violet-400/80">
-            Optional text generated by a model earlier and cached server-side. The dashboard never
-            calls a model.
+          <p className="mt-1 text-sm text-ink-muted">
+            Written by a model earlier and cached on the server. The dashboard does not call a
+            model on its own.
           </p>
-          <p className="mt-2 whitespace-pre-wrap text-xs leading-relaxed text-zinc-300">{ai.text}</p>
+          <p className="mt-2 whitespace-pre-wrap text-base leading-relaxed text-ink">{ai.text}</p>
         </div>
       )}
 
       <div className="mt-4 space-y-4">
-        <DetailList title="Depends on" values={node.depends_on} mono />
+        <DetailList title="Uses" values={node.depends_on} mono />
         <DetailList title="Used by" values={node.used_by} mono />
         <DetailList title="Related files" values={node.related_files} mono />
         {node.routes && node.routes.length > 0 && (
-          <DetailList title="Routes" values={node.routes} mono />
+          <DetailList title="Detected routes" values={node.routes} mono />
         )}
+      </div>
+
+      <div className="mt-4">
+        <button type="button" className="btn btn-secondary btn-block" onClick={onExplain}>
+          {node.kind === "folder" ? "Explain this component" : "Explain this file"}
+        </button>
+        <p className="hint mt-1.5">Asks for confirmation and a budget first — nothing is sent until you approve.</p>
       </div>
     </aside>
   );
@@ -217,136 +301,280 @@ function NodeDetails({ node, onClose }) {
 // Deterministic AST graph from GET /v1/graph, rendered with React Flow.
 export default function ArchitectureTab() {
   const [view, setView] = useState("overview");
-  const [module, setModule] = useState("");
+  const [requestModule, setRequestModule] = useState(""); // "" → server default
+  const [selected, setSelected] = useState(""); // what the selector displays
   const [graph, setGraph] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [selectedId, setSelectedId] = useState(null);
-  const [copyState, setCopyState] = useState("idle");
   const [reloadKey, setReloadKey] = useState(0);
 
+  const [rfNodes, setRfNodes] = useState([]);
+  const [rfEdges, setRfEdges] = useState([]);
+  const [selectedId, setSelectedId] = useState(null);
+  const [hoverEdgeId, setHoverEdgeId] = useState(null);
+  const [selectedEdgeId, setSelectedEdgeId] = useState(null);
+  const [copyState, setCopyState] = useState("idle");
+  const [explainTarget, setExplainTarget] = useState(null);
+  const seqRef = useRef(0);
+
+  // Fetch the graph for the current view + selected file. Never calls a model.
   useEffect(() => {
-    let cancelled = false;
+    const mySeq = (seqRef.current += 1);
     setLoading(true);
     setError(null);
-    setSelectedId(null);
     const params = new URLSearchParams({ view, limit: "24" });
-    if (view === "module" && module) params.set("module", module);
+    if (requestModule) params.set("module", requestModule);
     apiRequest(`/v1/graph?${params.toString()}`)
       .then((data) => {
-        if (!cancelled) setGraph(data);
+        if (mySeq !== seqRef.current) return; // stale response guard
+        setGraph(data);
+        // Keep the selector and the displayed graph in sync: the top-level
+        // `module` field IS the module the response was built from.
+        if (data && typeof data === "object" && data.module) setSelected(data.module);
+        else if (view === "module" || view === "flow") setSelected("");
       })
       .catch((err) => {
-        if (!cancelled) setError(err.message);
+        if (mySeq === seqRef.current) setError(err.message);
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (mySeq === seqRef.current) setLoading(false);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [view, module, reloadKey]);
+  }, [view, requestModule, reloadKey]);
 
-  const { rfNodes, rfEdges } = useMemo(() => {
-    if (!graph) return { rfNodes: [], rfEdges: [] };
+  const startExplain = useCallback((target) => setExplainTarget(target), []);
+
+  // Rebuild React Flow nodes/edges whenever the graph data changes, then let
+  // onNodesChange keep user-driven drags in state.
+  useEffect(() => {
+    if (!graph) {
+      setRfNodes([]);
+      setRfEdges([]);
+      setSelectedId(null);
+      return;
+    }
     const nodes = graph.nodes ?? [];
     const edges = graph.edges ?? [];
     const positions = computePositions(nodes, edges);
-    return {
-      rfNodes: nodes.map((node) => ({
+    setRfNodes(
+      nodes.map((node) => ({
         id: node.id,
         type: "kind",
+        initialWidth: NODE_WIDTH,
+        initialHeight: Y_STEP - 16,
         position: positions.get(node.id) ?? { x: 0, y: 0 },
         data: {
           label: node.label,
           kind: node.kind,
+          path: node.path,
           purpose: node.purpose,
+          ai: node.ai_explanation ?? null,
+          fileCount: node.file_count ?? 1,
+          explainedFiles: node.explained_files ?? 0,
+          coverage: coverageText(node),
+          unexplained: isUnexplained(node),
+          onExplain:
+            node.kind === "folder"
+              ? () =>
+                  startExplain({
+                    scope: "component",
+                    component: node.path,
+                    label: node.label,
+                  })
+              : node.path
+                ? () => startExplain({ scope: "file", path: node.path, label: node.label })
+                : null,
         },
-      })),
-      rfEdges: edges.map((edge) => ({
+      }))
+    );
+    setRfEdges(
+      edges.map((edge) => ({
         id: `${edge.source}-${edge.target}-${edge.kind}`,
         source: edge.source,
         target: edge.target,
-        label: edge.count > 1 ? `${edge.kind} ×${edge.count}` : edge.kind,
-        markerEnd: { type: MarkerType.ArrowClosed, color: "#52525b" },
-        style: { stroke: "#3f3f46" },
-      })),
-    };
-  }, [graph]);
+        data: {
+          label: edge.count > 1 ? `${edge.kind} ×${edge.count}` : edge.kind,
+          kind: edge.kind,
+        },
+        markerEnd: { type: MarkerType.ArrowClosed, color: "#BF8B67" },
+        style: { stroke: "#BF8B67" },
+      }))
+    );
+    setSelectedId(null);
+    setHoverEdgeId(null);
+    setSelectedEdgeId(null);
+  }, [graph, startExplain]);
 
-  const selectedNode = useMemo(
-    () => (graph?.nodes ?? []).find((node) => node.id === selectedId) ?? null,
-    [graph, selectedId]
+  // Edge labels appear only on hover/selection so they never overlap.
+  const visibleEdges = useMemo(
+    () =>
+      rfEdges.map((edge) =>
+        edge.id === hoverEdgeId || edge.id === selectedEdgeId
+          ? { ...edge, label: edge.data?.label }
+          : edge
+      ),
+    [rfEdges, hoverEdgeId, selectedEdgeId]
   );
+
+  const rawNodes = graph?.nodes ?? [];
+  const selectedNode = useMemo(
+    () => rawNodes.find((node) => node.id === selectedId) ?? null,
+    [rawNodes, selectedId]
+  );
+  const meta = graph?.meta ?? {};
+  const moduleOptions = meta.available_modules ?? [];
+  const startOptions = moduleOptions;
+  const hasEntryPoints = (meta.entrypoints ?? []).length > 0;
+
+  const changeView = (next) => {
+    setView(next);
+    setRequestModule("");
+    setSelected("");
+    setSelectedId(null);
+  };
 
   const copyMermaid = async () => {
     try {
       const params = new URLSearchParams({ view });
-      if (view === "module" && module) params.set("module", module);
+      if (requestModule) params.set("module", requestModule);
       const text = await apiText(`/v1/mermaid?${params.toString()}`);
-      if (!navigator.clipboard) throw new Error("Clipboard unavailable.");
-      await navigator.clipboard.writeText(text);
-      setCopyState("copied");
+      const ok = await (async () => {
+        if (navigator.clipboard?.writeText) {
+          try {
+            await navigator.clipboard.writeText(text);
+            return true;
+          } catch {
+            return false;
+          }
+        }
+        return false;
+      })();
+      setCopyState(ok ? "copied" : "error");
     } catch {
       setCopyState("error");
     }
     window.setTimeout(() => setCopyState("idle"), 2500);
   };
 
-  const meta = graph?.meta;
+  const explainProject = () =>
+    setExplainTarget({ scope: "project", label: "the whole project" });
+
+  const onExplainFinished = () => setReloadKey((key) => key + 1);
+
+  const emptyNotice =
+    meta.notice ||
+    (view === "flow"
+      ? meta.flow_notice
+      : meta.connections_notice) ||
+    "Nothing to show for this view yet.";
 
   return (
     <div className="space-y-4">
-      {/* View switcher + module selector */}
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="flex rounded-lg border border-zinc-700 p-0.5">
-          {VIEWS.map((option) => (
-            <button
-              key={option.id}
-              type="button"
-              onClick={() => setView(option.id)}
-              className={`rounded-md px-3 py-1 text-xs font-medium transition ${
-                view === option.id
-                  ? "bg-sky-600 text-white"
-                  : "text-zinc-400 hover:text-zinc-200"
-              }`}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
+      {/* View switcher */}
+      <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Guide views">
+        {VIEWS.map((option) => (
+          <button
+            key={option.id}
+            type="button"
+            onClick={() => changeView(option.id)}
+            aria-pressed={view === option.id}
+            className="chip"
+          >
+            {option.label}
+          </button>
+        ))}
 
         {view === "module" && (
-          <select
-            value={module || meta?.module || ""}
-            onChange={(event) => setModule(event.target.value)}
-            className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-200 outline-none transition focus:border-sky-600"
-          >
-            {!module && meta?.module && <option value={meta.module}>{meta.module}</option>}
-            {(meta?.available_modules ?? []).map((path) => (
-              <option key={path} value={path}>
-                {path}
-              </option>
-            ))}
-            {(meta?.available_modules ?? []).length === 0 && !meta?.module && (
-              <option value="">No modules detected</option>
-            )}
-          </select>
+          <>
+            <label className="label mb-0" htmlFor="cb-module-select">
+              File
+            </label>
+            <select
+              id="cb-module-select"
+              className="field w-auto min-w-56"
+              value={selected}
+              onChange={(event) => {
+                setSelected(event.target.value);
+                setRequestModule(event.target.value);
+              }}
+            >
+              {!selected && <option value="">Choose a file…</option>}
+              {selected && !moduleOptions.includes(selected) && (
+                <option value={selected}>{selected}</option>
+              )}
+              {moduleOptions.map((path) => (
+                <option key={path} value={path}>
+                  {path}
+                </option>
+              ))}
+              {moduleOptions.length === 0 && !selected && (
+                <option value="" disabled>
+                  No files detected
+                </option>
+              )}
+            </select>
+          </>
         )}
 
-        {loading && <Spinner label="Loading graph…" />}
-
-        {meta && (
-          <span className="text-[11px] text-zinc-600">
-            {meta.shown_nodes}/{meta.total_nodes} nodes
-            {meta.hidden_nodes > 0 ? ` · ${meta.hidden_nodes} hidden` : ""}
-          </span>
+        {view === "flow" && (
+          <>
+            <label className="label mb-0" htmlFor="cb-start-select">
+              Starting file
+            </label>
+            <select
+              id="cb-start-select"
+              className="field w-auto min-w-56"
+              value={selected}
+              onChange={(event) => {
+                setSelected(event.target.value);
+                setRequestModule(event.target.value);
+              }}
+            >
+              {hasEntryPoints && (
+                <option value="">Detected entry points (auto)</option>
+              )}
+              {selected && !startOptions.includes(selected) && (
+                <option value={selected}>{selected}</option>
+              )}
+              {startOptions.map((path) => (
+                <option key={path} value={path}>
+                  {path}
+                </option>
+              ))}
+              {startOptions.length === 0 && (
+                <option value="" disabled>
+                  No starting file detected
+                </option>
+              )}
+            </select>
+          </>
         )}
+
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          {loading && <Spinner label="Loading graph…" />}
+          <button type="button" className="btn btn-secondary" onClick={explainProject}>
+            Explain project
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={copyMermaid}>
+            {copyState === "copied"
+              ? "Copied ✓"
+              : copyState === "error"
+                ? "Copy failed"
+                : "Copy Mermaid"}
+          </button>
+        </div>
       </div>
+
+      {meta && (
+        <p className="hint">
+          {meta.shown_nodes}/{meta.total_nodes} nodes shown
+          {meta.hidden_nodes > 0 ? ` · ${meta.hidden_nodes} hidden to keep the view bounded` : ""}
+          {meta.file_count ? ` · ${meta.file_count} files scanned` : ""}
+        </p>
+      )}
 
       <ErrorBanner message={error} onRetry={() => setReloadKey((key) => key + 1)} />
 
-      {loading && !graph ? (
+      {loading ? (
         <Spinner label="Building graph…" />
       ) : error && !graph ? (
         <EmptyState
@@ -355,78 +583,126 @@ export default function ArchitectureTab() {
         />
       ) : graph && (graph.nodes ?? []).length === 0 ? (
         <EmptyState
-          title="No graph to show"
-          hint="No source files were detected for this view yet. Run the project scan, or try another view."
+          title={view === "flow" ? "No request path to show yet" : "No files to show yet"}
+          hint={emptyNotice}
+          action={
+            view === "flow" ? (
+              <span className="hint">
+                Pick a starting file above to explore its detected imports.
+              </span>
+            ) : null
+          }
         />
+      ) : rfNodes.length === 0 ? (
+        <Spinner label="Laying out graph…" />
       ) : (
         <div className="flex flex-col gap-4 lg:flex-row">
-          <div className="h-[560px] min-w-0 flex-1 overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950">
+          <div className="min-w-0 flex-1 overflow-hidden rounded-card border border-line bg-page" style={{ height: 560 }}>
             <ReactFlow
-              key={`${view}|${module}|${rfNodes.length}`}
+              key={`${view}|${requestModule}|${reloadKey}`}
               nodes={rfNodes}
-              edges={rfEdges}
+              edges={visibleEdges}
               nodeTypes={nodeTypes}
+              onNodesChange={(changes) => setRfNodes((current) => applyNodeChanges(changes, current))}
+              onEdgesChange={(changes) => setRfEdges((current) => applyEdgeChanges(changes, current))}
               fitView
-              fitViewOptions={{ padding: 0.3 }}
-              minZoom={0.2}
-              maxZoom={2}
+              fitViewOptions={{ padding: 0.25 }}
+              minZoom={0.3}
+              maxZoom={1.8}
               nodesDraggable
               nodesConnectable={false}
               elementsSelectable
               onNodeClick={(_, node) => setSelectedId(node.id)}
-              onPaneClick={() => setSelectedId(null)}
+              onPaneClick={() => {
+                setSelectedId(null);
+                setSelectedEdgeId(null);
+              }}
+              onEdgeMouseEnter={(_, edge) => setHoverEdgeId(edge.id)}
+              onEdgeMouseLeave={() => setHoverEdgeId(null)}
+              onEdgeClick={(_, edge) => setSelectedEdgeId(edge.id)}
               proOptions={{ hideAttribution: false }}
             >
-              <Background variant={BackgroundVariant.Dots} gap={18} size={1} color="#27272a" />
+              <Background variant={BackgroundVariant.Dots} gap={18} size={1} color="#D8CDB0" />
               <Controls showInteractive={false} />
               <MiniMap
                 pannable
                 zoomable
-                nodeColor={(node) => KIND_TONES[node.data?.kind]?.dot ?? "#a1a1aa"}
-                maskColor="rgba(9, 9, 11, 0.7)"
+                nodeColor={(node) => KIND_TONES[node.data?.kind]?.dot ?? "#855656"}
+                maskColor="rgba(99, 38, 38, 0.12)"
               />
               <Panel position="top-right">
-                <div className="flex flex-col items-end gap-1.5">
-                  <button
-                    type="button"
-                    onClick={copyMermaid}
-                    className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-500 hover:text-zinc-100"
-                  >
-                    {copyState === "copied"
-                      ? "Copied ✓"
-                      : copyState === "error"
-                        ? "Copy failed"
-                        : "Copy Mermaid"}
-                  </button>
-                  {meta?.notice && (
-                    <span className="max-w-[240px] rounded-lg border border-zinc-800 bg-zinc-900/90 px-2 py-1 text-right text-[10px] leading-snug text-zinc-500">
-                      {meta.notice}
-                    </span>
-                  )}
-                </div>
+                {meta.notice && (
+                  <span className="block max-w-[260px] rounded-control border border-line bg-surface px-3 py-2 text-right text-sm leading-snug text-ink-muted">
+                    {meta.notice}
+                  </span>
+                )}
               </Panel>
             </ReactFlow>
           </div>
 
           {selectedNode && (
-            <NodeDetails node={selectedNode} onClose={() => setSelectedId(null)} />
+            <NodeDetails
+              node={selectedNode}
+              onClose={() => setSelectedId(null)}
+              onExplain={() =>
+                selectedNode.kind === "folder"
+                  ? startExplain({
+                      scope: "component",
+                      component: selectedNode.path,
+                      label: selectedNode.label,
+                    })
+                  : startExplain({
+                      scope: "file",
+                      path: selectedNode.path,
+                      label: selectedNode.label,
+                    })
+              }
+            />
           )}
         </div>
       )}
 
+      {/* Connections / entry-point notices */}
+      {graph && (graph.nodes ?? []).length > 0 && (graph.edges ?? []).length === 0 && (
+        <p className="hint rounded-card border border-line bg-surface-alt px-4 py-3">
+          <strong>Connections not detected.</strong>{" "}
+          {meta.connections_notice ||
+            "No static imports or calls were found between the files shown here. That usually means imports are dynamic, resolved at runtime, or genuinely absent — the files above are still real."}
+        </p>
+      )}
+
+      {view === "flow" && graph && !hasEntryPoints && (
+        <p className="hint rounded-card border border-warn bg-warn-bg px-4 py-3 text-warn">
+          <strong>No entry point detected.</strong>{" "}
+          {meta.entrypoint_support
+            ? "ContextBridge looks for package scripts, main/app/server files and framework routes; none matched in this project. "
+            : ""}
+          Choose a starting file above to see how one file's requests travel.
+        </p>
+      )}
+
       {/* Legend */}
-      <div className="flex flex-wrap items-center gap-3 text-[11px] text-zinc-500">
+      <div className="flex flex-wrap items-center gap-3 text-sm text-ink-muted">
         {Object.entries(KIND_TONES).map(([kind, tone]) => (
           <span key={kind} className="flex items-center gap-1.5">
             <span
+              aria-hidden="true"
               className="inline-block h-2.5 w-2.5 rounded-full"
               style={{ backgroundColor: tone.dot }}
             />
             {kind}
           </span>
         ))}
-        <span className="text-zinc-600">Solid arrow = detected import or call</span>
+        <span>Arrow = detected import or call — hover an arrow to label it.</span>
       </div>
+
+      {explainTarget && (
+        <ExplainDialog
+          target={explainTarget}
+          onClose={() => setExplainTarget(null)}
+          onFinished={onExplainFinished}
+        />
+      )}
     </div>
   );
 }

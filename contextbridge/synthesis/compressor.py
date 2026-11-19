@@ -153,7 +153,11 @@ def project_sections(ctx: SessionContext) -> dict[str, list[str]]:
             unique.setdefault(" ".join(d.content.casefold().split()).rstrip("."), d)
     decisions = list(unique.values())
     notes = [d.content for d in decisions if d.tag == "note" and d.session_id == ctx.session.id]
-    goals = [text.split(":", 1)[1].strip() for text in notes if text.lower().startswith("goal:")]
+    goals = [
+        text.partition(":")[2].strip()
+        for text in notes
+        if text.lower().startswith("goal:") and text.partition(":")[2].strip()
+    ]
     done = [
         re.sub(r"^(?:Done|Completed):\s*", "", text, flags=re.I)
         for text in notes
@@ -210,14 +214,18 @@ def project_sections(ctx: SessionContext) -> dict[str, list[str]]:
         for p in paths[:8]
     ]
     sections = {
-        "Goal": goals[:1]
-        or [
-            ctx.goal
-            or (
-                f"Project purpose is not logged for {ctx.project}. "
-                "Add a Goal: note or README description."
-            )
-        ],
+        "Goal": (
+            [ctx.explicit_goal]
+            if ctx.explicit_goal
+            else goals[:1]
+            or [
+                ctx.goal
+                or (
+                    f"Project purpose is not logged for {ctx.project}. "
+                    "Add a Goal: note or README description."
+                )
+            ]
+        ),
         "Done": done or ["No completed work or changes logged."],
         "Decisions": [
             d.content for d in decisions if d.tag == "architecture" and d.status == "open"

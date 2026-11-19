@@ -25,7 +25,13 @@ if TYPE_CHECKING:
 
 from contextbridge.adapters.base_adapter import BaseAdapter
 from contextbridge.adapters.registry import all_adapters, get_adapter, resolve_name
-from contextbridge.chat_bridge import ChatPacket, build_chat_packet, chat_warnings, condense_chat
+from contextbridge.chat_bridge import (
+    ChatPacket,
+    build_chat_packet,
+    chat_sections,
+    chat_warnings,
+    condense_chat,
+)
 from contextbridge.chat_files import ImportedChat, read_chat_file
 from contextbridge.config import save_config
 from contextbridge.core.git_observer import HOOK_START, GitObserver, HookResult
@@ -56,6 +62,7 @@ from contextbridge.storage.db import (
 )
 from contextbridge.storage.workspace import (
     Workspace,
+    detect_branch,
     ensure_gitignored,
     find_context_dir,
     find_project_root,
@@ -433,6 +440,39 @@ class ProjectService:
     ) -> dict[str, Any]:
         return graph_view(self.project_map(), view, module, limit)
 
+    def working_changes(self) -> dict[str, Any]:
+        """Working-tree-only changes: branch, per-file line counts and totals.
+
+        Read straight from git on demand; no watcher or database write is involved.
+        """
+        observer = self._observer()
+        counts = {"total": 0, "staged": 0, "unstaged": 0, "untracked": 0}
+        if observer is None:
+            return {"branch": detect_branch(self.root), "files": [], "counts": counts}
+        ignore_globs = self.ws.load_config().capture.ignore_globs if self.is_initialized() else []
+        changes = observer.working_changes(ignore_globs=ignore_globs)
+        for change in changes:
+            if change.status == "untracked":
+                counts["untracked"] += 1
+            if change.status in ("staged", "staged+unstaged"):
+                counts["staged"] += 1
+            if change.status in ("unstaged", "staged+unstaged"):
+                counts["unstaged"] += 1
+        counts["total"] = len(changes)
+        return {
+            "branch": observer.current_branch() or detect_branch(self.root),
+            "files": [
+                {
+                    "path": change.path,
+                    "status": change.status,
+                    "insertions": change.insertions,
+                    "deletions": change.deletions,
+                }
+                for change in changes
+            ],
+            "counts": counts,
+        }
+
     def file_explanation_notice(self, path: str) -> str:
         from contextbridge.providers import create_provider
 
@@ -451,7 +491,13 @@ class ProjectService:
             "The AI-written result is cached until this file changes. Continue?"
         )
 
-    def explain_file(self, path: str, *, notify: Callable[[str], None] | None = None) -> str:
+    def explain_file(
+        self,
+        path: str,
+        *,
+        notify: Callable[[str], None] | None = None,
+        token_budget: int | None = None,
+    ) -> str:
         from contextbridge.synthesis.project_summary import ProjectSummarizer
 
         self.file_explanation_notice(path)
@@ -460,7 +506,7 @@ class ProjectService:
         with self.ws.open_db() as db:
             result = ProjectSummarizer(
                 self.root, db, self.ws.load_config(), notify=notify
-            ).summarize(only_file=path, explain=True)
+            ).summarize(only_file=path, explain=True, token_budget=token_budget)
         explanation = next((f.ai_explanation for f in result.files if f.path == path), "")
         if not explanation:
             raise UserError(
@@ -638,6 +684,13 @@ class ProjectService:
         run = self.record_test_run(command.strip(), result, report)
         return TestOutcome(run=run, report=report, result=result)
 
+    def test_history(self, *, limit: int = 20) -> list[TestRun]:
+        """Recorded runs of the active session, newest first (bounded)."""
+        ws = self._require_init()
+        with ws.open_db() as db:
+            session, _ = ws.active_session(db)
+            return db.test_runs(session.id, limit=limit)
+
     # ----- handoff -----------------------------------------------------------------------
 
     def summarize(
@@ -686,7 +739,7 @@ class ProjectService:
         label = agent_label(from_agent) or agent_label(detected) or "unknown"
         if adapter and label == adapter.name and notify:
             notify(
-                "Warning — the source and destination agents are the same. Check --from and --to."
+                "Warning — the source and destination are the same agent. Check --from and --to."
             )
         with ws.open_db() as db:
             session, _ = ws.active_session(db)
@@ -701,9 +754,8 @@ class ProjectService:
             from contextbridge.synthesis.project_summary import ProjectSummarizer
 
             overview = ProjectSummarizer(ws.root, db, config).summarize(
-                no_llm=use_llm is False, cached_only=True
+                no_llm=True, cached_only=True
             )
-            context.goal = overview.goal or context.goal
             context.file_purposes = {f.path: f.purpose for f in overview.files}
             context.summary_files = [f.path for f in overview.files if not is_test(f.path)][:8]
             if sum(d.tag == "note" and d.status == "open" for d in context.decisions) < 4:
@@ -849,6 +901,24 @@ class ChatService:
     @staticmethod
     def prepare(transcript: str, goal: str, pinned: str, budget: int = 6000) -> ChatPacket:
         return build_chat_packet(transcript, goal, pinned, budget)
+
+    @staticmethod
+    def handoff(
+        transcript: str, goal: str = "", pinned: str = "", budget: int = 6000
+    ) -> dict[str, Any]:
+        """The chat handoff packet plus its deterministic sections (no model calls)."""
+        try:
+            packet = build_chat_packet(transcript, goal, pinned, budget)
+            sections = chat_sections(transcript, goal, pinned)
+        except ValueError as exc:
+            raise UserError(str(exc)) from None
+        return {
+            "text": packet.text,
+            "warnings": list(packet.warnings),
+            "sections": sections,
+            "source_chars": packet.source_chars,
+            "omitted_chars": packet.omitted_chars,
+        }
 
     @staticmethod
     def condense(transcript: str, goal: str, pinned: str, budget: int = 2000) -> ChatPacket:

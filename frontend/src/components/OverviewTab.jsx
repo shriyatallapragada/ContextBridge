@@ -5,16 +5,24 @@ import {
   Card,
   EmptyState,
   ErrorBanner,
+  InfoDot,
   Spinner,
   formatDate,
   formatNumber,
 } from "./ui.jsx";
 
 const TASK_STATUSES = [
-  { id: "open", label: "Open", tone: "border-sky-800 bg-sky-950/60 text-sky-300" },
-  { id: "resolved", label: "Resolved", tone: "border-emerald-800 bg-emerald-950/60 text-emerald-300" },
-  { id: "dismissed", label: "Dismissed", tone: "border-zinc-700 bg-zinc-900 text-zinc-400" },
-  { id: "superseded", label: "Superseded", tone: "border-amber-800 bg-amber-950/60 text-amber-300" },
+  { id: "open", label: "Open", tone: "primary", symbol: "○" },
+  { id: "resolved", label: "Resolved", tone: "ok", symbol: "✓" },
+  { id: "dismissed", label: "Dismissed", tone: "neutral", symbol: "–" },
+  {
+    id: "superseded",
+    label: "Superseded",
+    tone: "warn",
+    symbol: "↻",
+    explain:
+      "Superseded means a newer task or decision replaced this one, so it was neither completed nor thrown away.",
+  },
 ];
 
 function CommitRow({ commit }) {
@@ -25,38 +33,39 @@ function CommitRow({ commit }) {
     <li className="relative pl-8">
       <span
         aria-hidden="true"
-        className="absolute left-[7px] top-6 h-3 w-3 rounded-full border-2 border-sky-500 bg-zinc-950"
+        className="absolute left-[7px] top-6 h-3 w-3 rounded-full border-2 border-accent bg-surface"
       />
-      <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 transition hover:border-zinc-700">
+      <div className="rounded-card border border-line bg-surface px-4 py-3 transition hover:border-accent">
         <div className="flex flex-wrap items-center gap-2">
-          <code className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-xs text-sky-400">
+          <code className="rounded-control bg-surface-alt px-2 py-0.5 font-mono text-sm text-primary">
             {commit.short_sha}
           </code>
-          <span className="min-w-0 flex-1 text-sm font-medium text-zinc-100">{commit.subject}</span>
+          <span className="min-w-0 flex-1 text-base font-semibold text-ink">{commit.subject}</span>
         </div>
-        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-500">
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-ink-muted">
           <span>{commit.author}</span>
           <span>{formatDate(commit.committed_at)}</span>
-          <span className="font-mono text-emerald-400">+{formatNumber(commit.insertions)}</span>
-          <span className="font-mono text-red-400">−{formatNumber(commit.deletions)}</span>
+          <span className="font-mono text-ok">+{formatNumber(commit.insertions)}</span>
+          <span className="font-mono text-danger">−{formatNumber(commit.deletions)}</span>
           {files.length > 0 && (
             <button
               type="button"
               onClick={() => setExpanded((value) => !value)}
-              className="rounded-md border border-zinc-700 px-2 py-0.5 text-zinc-400 transition hover:border-zinc-500 hover:text-zinc-200"
+              className="btn btn-secondary"
+              aria-expanded={expanded}
             >
               {expanded ? "Hide" : "Show"} {files.length} file{files.length === 1 ? "" : "s"}
             </button>
           )}
         </div>
         {expanded && files.length > 0 && (
-          <ul className="mt-3 space-y-1 border-t border-zinc-800 pt-3">
+          <ul className="mt-3 space-y-1 border-t border-line pt-3">
             {files.map((file) => (
-              <li key={file.path} className="flex items-baseline justify-between gap-3 text-xs">
-                <span className="min-w-0 truncate font-mono text-zinc-400" title={file.path}>
+              <li key={file.path} className="flex items-baseline justify-between gap-3 text-sm">
+                <span className="min-w-0 truncate font-mono text-ink-muted" title={file.path}>
                   {file.path}
                 </span>
-                <span className="shrink-0 font-mono text-zinc-600">{file.lines}L</span>
+                <span className="shrink-0 font-mono text-ink-muted">{file.lines}L</span>
               </li>
             ))}
           </ul>
@@ -66,7 +75,7 @@ function CommitRow({ commit }) {
   );
 }
 
-// North Star editor, momentum strip, git timeline and task counts in one tab.
+// Project goal editor, momentum strip, git timeline and task counts.
 export default function OverviewTab({ onNavigate }) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -79,6 +88,7 @@ export default function OverviewTab({ onNavigate }) {
 
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState(null);
+  const [seq, setSeq] = useState(0);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -99,7 +109,7 @@ export default function OverviewTab({ onNavigate }) {
   const saveIntent = async (event) => {
     event.preventDefault();
     const clean = draft.trim();
-    if (!clean || saving) return;
+    if (!clean || saving) return; // saving also guards against double submits
     setSaving(true);
     setSaveError(null);
     try {
@@ -107,17 +117,19 @@ export default function OverviewTab({ onNavigate }) {
         method: "PUT",
         body: { north_star: clean },
       });
+      // Optimistic-but-safe: only commit the new goal after the server confirms it.
       setData((current) =>
         current
           ? {
               ...current,
-              north_star: updated.north_star,
-              north_star_updated_at: updated.updated_at,
+              north_star: updated.north_star ?? clean,
+              north_star_updated_at: updated.updated_at ?? current.north_star_updated_at,
             }
           : current
       );
       setEditing(false);
     } catch (err) {
+      // The draft stays in the editor so nothing typed is lost.
       setSaveError(err.message);
     } finally {
       setSaving(false);
@@ -161,8 +173,8 @@ export default function OverviewTab({ onNavigate }) {
   const momentumStats = [
     { label: "Commits", value: formatNumber(momentum.commits ?? 0) },
     { label: "Authors", value: (momentum.authors ?? []).length },
-    { label: "Insertions", value: `+${formatNumber(momentum.insertions ?? 0)}`, tone: "text-emerald-400" },
-    { label: "Deletions", value: `−${formatNumber(momentum.deletions ?? 0)}`, tone: "text-red-400" },
+    { label: "Added", value: `+${formatNumber(momentum.insertions ?? 0)}`, tone: "text-ok" },
+    { label: "Removed", value: `−${formatNumber(momentum.deletions ?? 0)}`, tone: "text-danger" },
     { label: "Files touched", value: formatNumber(momentum.files_touched ?? 0) },
     { label: "Window", value: `${momentum.window ?? commits.length} commits` },
   ];
@@ -171,9 +183,22 @@ export default function OverviewTab({ onNavigate }) {
     <div className="space-y-6">
       <ErrorBanner message={error} onRetry={load} />
 
-      {/* North Star */}
+      <div className="flex flex-wrap gap-2" aria-label="Quick actions">
+        <button type="button" className="btn btn-primary" onClick={() => onNavigate("handoff")}>
+          Prepare a handoff →
+        </button>
+        <button type="button" className="btn btn-secondary" onClick={() => onNavigate("guide")}>
+          Open project guide
+        </button>
+        <button type="button" className="btn btn-secondary" onClick={() => onNavigate("changes")}>
+          Changes and tests
+        </button>
+      </div>
+
+      {/* Project goal (formerly “North Star”) */}
       <Card
-        title="North Star"
+        title="Project goal"
+        subtitle="The one-sentence North Star for this project — shown to every agent that receives a handoff."
         actions={
           !editing && (
             <button
@@ -183,55 +208,53 @@ export default function OverviewTab({ onNavigate }) {
                 setSaveError(null);
                 setEditing(true);
               }}
-              className="rounded-lg border border-zinc-700 px-3 py-1 text-xs font-medium text-zinc-300 transition hover:border-zinc-500 hover:text-zinc-100"
+              className="btn btn-secondary"
             >
-              Edit
+              Edit goal
             </button>
           )
         }
       >
         {editing ? (
           <form onSubmit={saveIntent} className="space-y-3">
+            <label className="label" htmlFor="cb-goal">
+              Project goal
+            </label>
             <textarea
+              id="cb-goal"
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               rows={4}
               maxLength={4000}
               autoFocus
               placeholder="One sentence describing what this project is trying to achieve…"
-              className="w-full resize-y rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm leading-relaxed text-zinc-200 outline-none transition focus:border-sky-600"
+              className="field"
             />
             <ErrorBanner message={saveError} />
-            <div className="flex items-center gap-2">
-              <button
-                type="submit"
-                disabled={!draft.trim() || saving}
-                className="rounded-lg bg-sky-600 px-4 py-1.5 text-sm font-medium text-white transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                {saving ? "Saving…" : "Save"}
+            <div className="flex flex-wrap items-center gap-2">
+              <button type="submit" disabled={!draft.trim() || saving} className="btn btn-primary">
+                {saving ? "Saving…" : "Save goal"}
               </button>
               <button
                 type="button"
                 onClick={() => setEditing(false)}
-                className="rounded-lg border border-zinc-700 px-4 py-1.5 text-sm text-zinc-300 transition hover:border-zinc-500"
+                className="btn btn-secondary"
+                disabled={saving}
               >
                 Cancel
               </button>
+              {saveError && <span className="hint">Your draft is still here — retry when ready.</span>}
             </div>
           </form>
-        ) : data.north_star ? (
+        ) : (data.north_star || data.project_goal) ? (
           <div className="space-y-2">
-            <p className="whitespace-pre-wrap text-sm leading-relaxed text-zinc-200">
-              {data.north_star}
-            </p>
-            <p className="text-xs text-zinc-500">
-              Updated {formatDate(data.north_star_updated_at)}
-            </p>
+            <p className="whitespace-pre-wrap text-lg leading-relaxed text-ink">{data.north_star || data.project_goal}</p>
+            <p className="hint">{data.north_star ? `Last updated ${formatDate(data.north_star_updated_at)}` : "From a Goal note or project description. Set an explicit goal to override it."}</p>
           </div>
         ) : (
           <EmptyState
-            title="No North Star yet"
-            hint="Describe, in one sentence, what this project is trying to achieve. It persists in SQLite across sessions."
+            title="No project goal yet"
+            hint="Describe, in one sentence, what this project is trying to achieve. It persists in SQLite across sessions and is included in handoffs."
             action={
               <button
                 type="button"
@@ -239,9 +262,9 @@ export default function OverviewTab({ onNavigate }) {
                   setDraft("");
                   setEditing(true);
                 }}
-                className="rounded-lg bg-sky-600 px-4 py-1.5 text-sm font-medium text-white transition hover:bg-sky-500"
+                className="btn btn-primary"
               >
-                Write it
+                Write the goal
               </button>
             }
           />
@@ -249,24 +272,22 @@ export default function OverviewTab({ onNavigate }) {
       </Card>
 
       {/* Momentum strip */}
-      <Card title="Momentum" actions={<span className="text-xs text-zinc-500">{data.branch}</span>}>
+      <Card title="Momentum" actions={<Badge tone="neutral" symbol="⎇">{data.branch}</Badge>}>
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
           {momentumStats.map((stat) => (
             <div
               key={stat.label}
-              className="rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-3 text-center"
+              className="rounded-card border border-line bg-surface-alt px-3 py-3 text-center"
             >
-              <div className={`text-lg font-semibold tabular-nums ${stat.tone ?? "text-zinc-100"}`}>
+              <div className={`text-xl font-bold tabular-nums ${stat.tone ?? "text-ink"}`}>
                 {stat.value}
               </div>
-              <div className="mt-0.5 text-[11px] uppercase tracking-wide text-zinc-500">
-                {stat.label}
-              </div>
+              <div className="mt-0.5 text-sm text-ink-muted">{stat.label}</div>
             </div>
           ))}
         </div>
         {(momentum.latest_at || momentum.oldest_at) && (
-          <p className="mt-3 text-xs text-zinc-600">
+          <p className="hint mt-3">
             {formatDate(momentum.oldest_at)} → {formatDate(momentum.latest_at)}
           </p>
         )}
@@ -277,27 +298,28 @@ export default function OverviewTab({ onNavigate }) {
         <div className="lg:col-span-2">
           <Card
             title="Git timeline"
+            subtitle="Recent commits — expand a row to see its files."
             actions={
-              <div className="flex items-center gap-3">
-                <ErrorBanner message={refreshError} />
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   onClick={refreshCommits}
                   disabled={refreshing}
-                  className="rounded-lg border border-zinc-700 px-3 py-1 text-xs font-medium text-zinc-300 transition hover:border-zinc-500 hover:text-zinc-100 disabled:opacity-50"
+                  className="btn btn-secondary"
                 >
                   {refreshing ? "Refreshing…" : "Refresh from git"}
                 </button>
               </div>
             }
           >
+            <ErrorBanner message={refreshError} />
             {commits.length === 0 ? (
               <EmptyState
                 title="No commits in the window yet"
                 hint="Commit once, then use “Refresh from git” to pull the latest history."
               />
             ) : (
-              <ol className="relative space-y-4 before:absolute before:bottom-2 before:left-[12px] before:top-2 before:w-px before:bg-zinc-800">
+              <ol className="relative mt-3 space-y-4 before:absolute before:bottom-2 before:left-[12px] before:top-2 before:w-px before:bg-line">
                 {commits.map((commit) => (
                   <CommitRow key={commit.sha} commit={commit} />
                 ))}
@@ -314,7 +336,7 @@ export default function OverviewTab({ onNavigate }) {
               <button
                 type="button"
                 onClick={() => onNavigate("tasks")}
-                className="text-xs font-medium text-sky-400 transition hover:text-sky-300"
+                className="btn btn-secondary"
               >
                 Open checklist →
               </button>
@@ -326,17 +348,22 @@ export default function OverviewTab({ onNavigate }) {
                   key={status.id}
                   type="button"
                   onClick={() => onNavigate("tasks")}
-                  className="flex w-full items-center justify-between rounded-lg border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-left transition hover:border-zinc-600"
+                  className="flex w-full items-center justify-between gap-2 rounded-control border border-line bg-surface-alt px-3 py-2.5 text-left transition hover:border-accent"
                 >
-                  <Badge className={status.tone}>{status.label}</Badge>
-                  <span className="text-sm font-semibold tabular-nums text-zinc-200">
+                  <span className="flex min-w-0 items-center gap-2">
+                    <Badge tone={status.tone} symbol={status.symbol}>
+                      {status.label}
+                    </Badge>
+                    {status.explain && <InfoDot label={status.explain} />}
+                  </span>
+                  <span className="text-lg font-bold tabular-nums text-ink">
                     {counts[status.id] ?? 0}
                   </span>
                 </button>
               ))}
-              <div className="flex items-center justify-between border-t border-zinc-800 pt-2 text-xs text-zinc-500">
+              <div className="flex items-center justify-between border-t border-line pt-2 text-base text-ink-muted">
                 <span>Total</span>
-                <span className="font-semibold tabular-nums text-zinc-300">{counts.total ?? 0}</span>
+                <span className="font-bold tabular-nums text-ink">{counts.total ?? 0}</span>
               </div>
             </div>
           </Card>

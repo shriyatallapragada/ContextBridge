@@ -3,26 +3,32 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 import sqlite3
+import threading
+import uuid
 from contextlib import suppress
 from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from contextbridge.chat_bridge import MAX_CHAT_CHARS
+from contextbridge.config import LLM_PROVIDERS
 from contextbridge.core.sanitizer import sanitize
 from contextbridge.dashboard import (
     add_task,
     get_commits,
     get_intent,
     import_chat_tasks,
+    list_notes,
     list_tasks,
     overview,
     preview_chat_tasks,
@@ -31,9 +37,12 @@ from contextbridge.dashboard import (
     set_intent,
     update_task,
 )
-from contextbridge.errors import ContextBridgeError, UserError
+from contextbridge.errors import AdapterConflictError, ContextBridgeError, UserError
 from contextbridge.project_map import export_mermaid
-from contextbridge.service import ProjectService
+from contextbridge.providers import DEFAULT_ENDPOINTS, credentials
+from contextbridge.providers.settings import ProviderSettingsService, ProviderStatus
+from contextbridge.service import ChatService, PreparedHandoff, ProjectService, detect_test_command
+from contextbridge.storage.db import parse_utc, utc_now
 
 LOOPBACK = "127.0.0.1"
 UI_ENV_VAR = "CB_UI_DIR"
@@ -45,8 +54,9 @@ class HandoffRequest(BaseModel):
     to_agent: str = Field(default="generic", max_length=80)
     from_agent: str | None = Field(default=None, max_length=80)
     budget: int = Field(default=2000, ge=120, le=12000)
-    polish: bool = False
+    polish: bool | None = None
     force: bool = False
+    preview_id: str | None = Field(default=None, max_length=40)
 
 
 class IntentRequest(BaseModel):
@@ -69,6 +79,193 @@ class ChatImportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     text: str = Field(min_length=1, max_length=MAX_CHAT_CHARS)
     commit: bool = True
+
+
+class NoteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str = Field(min_length=1, max_length=4000)
+    tag: str = Field(default="note", max_length=20)
+
+
+class TestRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    command: str = Field(min_length=1, max_length=500)
+
+
+class SettingsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mode: Literal["off", "local", "cloud"]
+    provider: str | None = Field(default=None, max_length=40)
+    model: str = Field(default="", max_length=200)
+    endpoint: str | None = Field(default=None, max_length=500)
+    api_key: str | None = Field(default=None, max_length=500)
+    polish_handoffs: bool | None = None
+
+
+class SettingsTestRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    provider: str | None = Field(default=None, max_length=40)
+    model: str | None = Field(default=None, max_length=200)
+    endpoint: str | None = Field(default=None, max_length=500)
+    api_key: str | None = Field(default=None, max_length=500)
+
+
+class ExplainRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scope: Literal["file", "component", "project"]
+    path: str | None = Field(default=None, max_length=500)
+    component: str | None = Field(default=None, max_length=300)
+    max_requests: int = Field(default=20, ge=1, le=200)
+    token_budget: int = Field(default=40000, ge=1000, le=1000000)
+    confirm: bool = False
+
+
+class ChatHandoffRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str = Field(min_length=1, max_length=MAX_CHAT_CHARS)
+    goal: str = Field(default="", max_length=1000)
+    pinned: str = Field(default="", max_length=1000)
+    budget: int = Field(default=6000, ge=2000, le=12000)
+
+
+class ChatImportFileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str = Field(min_length=1, max_length=4000)
+
+
+# ----- background run state -------------------------------------------------------
+# One run at a time per app. The API only records what the services stream back;
+# parsing, storage and model work all stay in the engine.
+
+_RETRY_RE = re.compile(r"Retry in ([0-9.]+)s")
+_REQUESTS_RE = re.compile(r"(\d+)\s*/\s*(\d+)\s*requests")
+_TOKENS_RE = re.compile(r"([\d,]+)\s*/\s*[\d,]+\s*reserved tokens")
+_WARNING_RE = re.compile(r"stopped|Retry in|budget reached|Wait budget reached", re.I)
+_MAX_MESSAGES = 500
+_MAX_OUTPUT_CHARS = 200_000
+
+
+class _RunSlot:
+    """Live state of one background operation; ``begin`` refuses a second run."""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        self.run_id: str | None = None
+        self.running = False
+        self.started_at: str | None = None
+        self.finished_at: str | None = None
+        self.error: str | None = None
+
+    def begin(self) -> str:
+        with self._lock:
+            if self.running:
+                raise HTTPException(status_code=409, detail="Another run is already in progress.")
+            self.run_id = uuid.uuid4().hex[:12]
+            self.running = True
+            self.started_at = utc_now(precise=True)
+            self.finished_at = None
+            self.error = None
+            return self.run_id
+
+    def finish(self, error: str | None = None) -> None:
+        with self._lock:
+            self.running = False
+            self.finished_at = utc_now(precise=True)
+            self.error = error
+
+    @property
+    def done(self) -> bool:
+        with self._lock:
+            return self.run_id is not None and not self.running
+
+
+class _TestRunSlot(_RunSlot):
+    """Streamed output and the parsed report of the latest test run."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.command: str | None = None
+        self.output = ""
+        self.report: dict[str, Any] | None = None
+
+    def begin_run(self, command: str) -> str:
+        with self._lock:
+            run_id = self.begin()
+            self.command = command
+            self.output = ""
+            self.report = None
+            return run_id
+
+    def append(self, text: str) -> None:
+        with self._lock:
+            self.output = (self.output + text)[-_MAX_OUTPUT_CHARS:]
+
+    def record(self, report: dict[str, Any]) -> None:
+        with self._lock:
+            self.report = report
+
+
+class _ExplainSlot(_RunSlot):
+    """Every notify message of the running explanation, with its timestamp."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.scope: str | None = None
+        self.messages: list[dict[str, str]] = []
+        self.summary: str | None = None
+
+    def begin_scope(self, scope: str) -> str:
+        with self._lock:
+            run_id = self.begin()
+            self.scope = scope
+            self.messages = []
+            self.summary = None
+            return run_id
+
+    def notify(self, text: str) -> None:
+        with self._lock:
+            self.messages.append({"text": sanitize(text), "at": utc_now(precise=True)})
+            del self.messages[:-_MAX_MESSAGES]
+
+    def record(self, summary: str | None) -> None:
+        with self._lock:
+            self.summary = summary
+
+
+def _last_match(pattern: re.Pattern[str], text: str) -> tuple[int, ...] | None:
+    """Groups of the last match (the most recent progress message wins)."""
+    found: tuple[int, ...] | None = None
+    for match in pattern.finditer(text):
+        found = tuple(int(float(group.replace(",", ""))) for group in match.groups())
+    return found
+
+
+def explain_status(slot: _ExplainSlot) -> dict[str, Any]:
+    """Shape one explanation run for the dashboard (parsing the engine's messages)."""
+    texts = [message["text"] for message in slot.messages]
+    blob = "\n".join([slot.summary or "", slot.error or "", *texts])
+    requests = _last_match(_REQUESTS_RE, blob)
+    tokens = _last_match(_TOKENS_RE, blob)
+    retry = _last_match(_RETRY_RE, blob)
+    warnings: list[str] = []
+    for text in texts:
+        if _WARNING_RE.search(text) and text not in warnings:
+            warnings.append(text)
+    return {
+        "run_id": slot.run_id,
+        "running": slot.running,
+        "scope": slot.scope,
+        "messages": list(slot.messages),
+        "summary": slot.summary,
+        "error": slot.error,
+        "done": slot.done,
+        "retry_in_seconds": float(retry[0]) if retry else None,
+        "requests_used": requests[0] if requests else None,
+        "requests_budget": requests[1] if requests else None,
+        "tokens_reserved": tokens[0] if tokens else None,
+        "cache_hits": sum(text.startswith("Cached ") for text in texts),
+        "warnings": warnings,
+    }
 
 
 def _ui_directory() -> Path | None:
@@ -100,6 +297,12 @@ def create_app(root: Path) -> FastAPI:
             service.init(install_hook=False)
         return service
 
+    # One background run at a time per app, for tests and for explanations.
+    test_slot = _TestRunSlot()
+    explain_slot = _ExplainSlot()
+    handoff_lock = threading.Lock()
+    latest_preview: tuple[str, HandoffRequest, PreparedHandoff, list[str]] | None = None
+
     @app.middleware("http")
     async def authenticate(request: Request, call_next: Any) -> Any:
         # The built UI shell carries no project data; every API route still needs a token.
@@ -119,7 +322,10 @@ def create_app(root: Path) -> FastAPI:
 
     @app.exception_handler(ContextBridgeError)
     async def project_error(request: Request, exc: ContextBridgeError) -> JSONResponse:
-        return JSONResponse({"detail": sanitize(exc.message)}, status_code=400)
+        return JSONResponse(
+            {"detail": sanitize(exc.message)},
+            status_code=409 if isinstance(exc, AdapterConflictError) else 400,
+        )
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -186,12 +392,199 @@ def create_app(root: Path) -> FastAPI:
     ) -> dict[str, Any]:
         return get_commits(ready(), limit=limit, refresh=refresh)
 
+    # ----- notes, working-tree changes, tests (all deterministic) ----------
+
+    @app.get("/v1/notes")
+    def notes(
+        tag: str | None = Query(default=None, max_length=20),
+        limit: int = Query(default=200, ge=1, le=500),
+    ) -> dict[str, Any]:
+        return list_notes(ready(), tag=tag, limit=limit)
+
+    @app.post("/v1/notes", status_code=201)
+    def create_note(body: NoteRequest) -> dict[str, Any]:
+        decision = ready().add_note(body.text, body.tag).decision
+        return {
+            "id": decision.id,
+            "content": decision.content,
+            "tag": decision.tag,
+            "created_at": decision.created_at,
+        }
+
+    @app.delete("/v1/notes/{note_id}")
+    def delete_note(note_id: str) -> dict[str, Any]:
+        # Notes and tasks are rows of the same decision log, so removal is shared.
+        return remove_task(ready(), note_id)
+
+    @app.get("/v1/changes")
+    def changes() -> dict[str, Any]:
+        return ready().working_changes()
+
+    @app.get("/v1/tests/detect")
+    def tests_detect() -> dict[str, Any]:
+        return {"command": detect_test_command(ready().root)}
+
+    @app.post("/v1/tests/run", status_code=202)
+    def start_test_run(body: TestRunRequest) -> dict[str, Any]:
+        svc = ready()
+        run_id = test_slot.begin_run(body.command.strip())
+
+        def work() -> None:
+            error: str | None = None
+            try:
+                outcome = svc.run_tests(body.command, on_output=test_slot.append)
+                test_slot.record(
+                    {
+                        "passed": outcome.report.passed,
+                        "failed": outcome.report.failed,
+                        "skipped": outcome.report.skipped,
+                        "runner": outcome.report.runner,
+                        "recognized": outcome.report.recognized,
+                        "failures": [
+                            {key: sanitize(value) for key, value in failure.items()}
+                            for failure in outcome.report.failures
+                        ],
+                        "exit_code": outcome.result.exit_code,
+                    }
+                )
+            except ContextBridgeError as exc:
+                error = sanitize(exc.message)
+            except Exception:  # pragma: no cover - defensive: never leave the slot stuck.
+                error = "The test run failed unexpectedly."
+            test_slot.finish(error)
+
+        threading.Thread(target=work, daemon=True, name="cb-test-run").start()
+        return {"run_id": run_id}
+
+    @app.get("/v1/tests/status")
+    def test_status() -> dict[str, Any]:
+        return {
+            "run_id": test_slot.run_id,
+            "running": test_slot.running,
+            "command": test_slot.command,
+            "output": test_slot.output,
+            "report": test_slot.report,
+            "started_at": test_slot.started_at,
+            "finished_at": test_slot.finished_at,
+            "error": test_slot.error,
+        }
+
+    @app.get("/v1/tests/history")
+    def test_history(limit: int = Query(default=20, ge=1, le=100)) -> dict[str, Any]:
+        runs = ready().test_history(limit=limit)
+        items = [
+            {
+                "id": run.id,
+                "command": run.command,
+                "exit_code": run.exit_code,
+                "passed": run.passed,
+                "failed": run.failed,
+                "skipped": run.skipped,
+                "ran_at": run.timestamp,
+            }
+            for run in runs
+        ]
+        age: int | None = None
+        if runs:
+            age = max(int((datetime.now(UTC) - parse_utc(runs[0].timestamp)).total_seconds()), 0)
+        return {
+            "runs": items,
+            "last_run_age_seconds": age,
+            "stale": age is None or age > 86400,
+        }
+
+    # ----- provider settings (never echo a key) ----------------------------
+
+    def settings_payload() -> dict[str, Any]:
+        cfg = ProviderSettingsService(context_dir=service.ws.context_dir).load()
+        llm = cfg.llm
+        key_endpoint = DEFAULT_ENDPOINTS.get(llm.provider, llm.base_url)
+        return {
+            "mode": {"none": "off", "ollama": "local"}.get(llm.provider, "cloud"),
+            "model": llm.model,
+            "endpoint": (
+                ""
+                if llm.provider == "none"
+                else llm.ollama_host
+                if llm.provider == "ollama"
+                else key_endpoint
+            ),
+            "provider": llm.provider,
+            "polish_handoffs": cfg.handoff.polish,
+            "has_api_key": llm.provider in {"openai-compatible", "groq", "openai"}
+            and bool(credentials.get_key(key_endpoint)),
+        }
+
+    @app.get("/v1/settings")
+    def get_settings() -> dict[str, Any]:
+        ready()
+        return settings_payload()
+
+    @app.post("/v1/settings")
+    def save_settings(body: SettingsRequest) -> dict[str, Any]:
+        svc = ready()
+        provider = {"off": "none", "local": "ollama", "cloud": "openai-compatible"}[body.mode]
+        ProviderSettingsService(context_dir=svc.ws.context_dir).save(
+            provider,
+            model=body.model,
+            endpoint=body.endpoint or "",
+            api_key=body.api_key or "",
+            polish_handoffs=body.polish_handoffs,
+        )
+        return settings_payload()
+
+    @app.post("/v1/settings/test")
+    def test_settings(body: SettingsTestRequest) -> dict[str, Any]:
+        svc = ready()
+        store = ProviderSettingsService(context_dir=svc.ws.context_dir)
+        cfg = store.load()
+        provider = body.provider or cfg.llm.provider
+        if provider not in LLM_PROVIDERS:
+            raise UserError(f"Unknown provider {provider!r}.")
+        model = cfg.llm.model if body.model is None else body.model
+        if body.endpoint is not None:
+            endpoint = body.endpoint
+        elif provider == "ollama":
+            endpoint = cfg.llm.ollama_host
+        else:
+            endpoint = DEFAULT_ENDPOINTS.get(provider, cfg.llm.base_url)
+        try:
+            status = store.check(provider, model, endpoint, body.api_key or "")
+        except Exception:  # A probe must answer, never surface a traceback.
+            status = ProviderStatus(False, "The connection check failed unexpectedly.")
+        return {"ok": status.ok, "message": status.message}
+
     @app.post("/v1/chat-import")
     def chat_import(body: ChatImportRequest) -> dict[str, Any]:
         """Parse a pasted transcript into tasks; ``commit: false`` previews first."""
         if not body.commit:
             return {"parsed": preview_chat_tasks(body.text), "committed": False}
         return import_chat_tasks(ready(), body.text, commit=True)
+
+    # ----- conversation handoff (deterministic, no model) -----------------
+
+    @app.post("/v1/chat/handoff")
+    def chat_handoff(body: ChatHandoffRequest) -> dict[str, Any]:
+        return ChatService.handoff(body.text, body.goal, body.pinned, body.budget)
+
+    @app.post("/v1/chat/import-file")
+    def chat_import_file(body: ChatImportFileRequest) -> dict[str, Any]:
+        try:
+            path = (service.root / Path(body.path).expanduser()).resolve()
+            if not path.is_relative_to(service.root) or not path.is_file():
+                raise UserError("Choose a PDF, Markdown, or text file inside this project.")
+            imported = ChatService.import_file(path)
+        except ModuleNotFoundError:
+            raise UserError(
+                "PDF import requires pypdf. Install the ContextBridge gui extra."
+            ) from None
+        except ValueError as exc:
+            raise UserError(str(exc)) from None
+        except OSError:
+            raise UserError(
+                "That file could not be read. Choose a PDF, Markdown, or text file."
+            ) from None
+        return {"text": imported.text, "warnings": [imported.notice] if imported.notice else []}
 
     @app.get("/v1/graph")
     def graph(
@@ -217,36 +610,162 @@ def create_app(root: Path) -> FastAPI:
         result = service.summarize(cached_only=True, explain=True)
         return {**asdict(result), "text": result.render(budget)}
 
-    def prepare(body: HandoffRequest) -> Any:
+    # ----- explain pipeline (a model runs only when a run is started) -----
+
+    @app.get("/v1/explain/notice")
+    def explain_notice(
+        scope: Literal["file", "project", "component"] = Query(default="project"),
+        path: str | None = Query(default=None, max_length=500),
+        component: str | None = Query(default=None, max_length=300),  # kept for the UI's URL
+        max_requests: int = Query(default=20, ge=1, le=200),
+        token_budget: int = Query(default=40000, ge=1000, le=1000000),
+    ) -> dict[str, Any]:
+        """The privacy confirmation payload; provider `none` answers 400 with its message."""
+        svc = ready()
+        if scope == "file":
+            if not path:
+                raise UserError("Choose a file to explain.")
+            return {
+                "text": svc.file_explanation_notice(path),
+                "requests": svc.ws.load_config().summary.max_requests,
+                "tokens": token_budget,
+            }
+        return {
+            "text": svc.project_explanation_notice(max_requests, token_budget),
+            "requests": max_requests,
+            "tokens": token_budget,
+        }
+
+    @app.post("/v1/explain", status_code=202)
+    def start_explain(body: ExplainRequest) -> dict[str, Any]:
+        svc = ready()
+        if not body.confirm:
+            raise UserError("Confirm the privacy notice before any file leaves this computer.")
+        if body.scope == "file" and not body.path:
+            raise UserError("Choose a file to explain.")
+        if body.scope == "component" and not body.component:
+            raise UserError("Choose a component to explain.")
+        # The notice checks the provider first: `none` is a 400 and no run starts.
+        if body.scope == "file":
+            svc.file_explanation_notice(body.path or "")
+        else:
+            svc.project_explanation_notice(body.max_requests, body.token_budget)
+        run_id = explain_slot.begin_scope(body.scope)
+
+        def work() -> None:
+            error: str | None = None
+            summary: str | None = None
+            try:
+                if body.scope == "file":
+                    summary = svc.explain_file(
+                        body.path or "", notify=explain_slot.notify, token_budget=body.token_budget
+                    )
+                else:
+                    summary = svc.explain_project(
+                        max_requests=body.max_requests,
+                        token_budget=body.token_budget,
+                        component=body.component if body.scope == "component" else None,
+                        notify=explain_slot.notify,
+                    )
+            except ContextBridgeError as exc:
+                error = sanitize(exc.message)
+            except Exception:  # pragma: no cover - defensive: never leave the slot stuck.
+                error = "The explanation failed unexpectedly; progress is cached."
+            explain_slot.record(summary)
+            explain_slot.finish(error)
+
+        threading.Thread(target=work, daemon=True, name="cb-explain").start()
+        return {"run_id": run_id}
+
+    @app.get("/v1/explain/status")
+    def explain_status_route() -> dict[str, Any]:
+        return explain_status(explain_slot)
+
+    def prepare(body: HandoffRequest) -> tuple[PreparedHandoff, list[str]]:
+        """Build the handoff and collect its warnings; nothing is written yet."""
         if not service.is_initialized():
             service.init(install_hook=False)
-        return service.prepare_handoff(
+        notices: list[str] = []
+
+        def notify(message: str) -> None:
+            clean = sanitize(message)
+            notices.append(clean)
+            print(clean, flush=True)
+
+        result = service.prepare_handoff(
             body.from_agent,
             body.to_agent,
             budget=body.budget,
             use_llm=body.polish,
             force=body.force,
-            notify=lambda message: print(sanitize(message), flush=True),
+            notify=notify,
         )
+        warnings = [message for message in notices if message.startswith("Warning")]
+        return result, warnings
+
+    def handoff_payload(
+        result: PreparedHandoff, warnings: list[str], *, written: bool
+    ) -> dict[str, Any]:
+        """The existing handoff fields plus source, target and test evidence."""
+        adapter = result.adapter
+        context = result.context
+        run = context.test_run
+        source = result.from_label or "unknown"
+        return {
+            **asdict(result.handoff),
+            "source_agent": result.from_label or "unknown",
+            "source_label": source,
+            "target": adapter.relative_path if adapter else None,
+            # Absolute path: unambiguous next to the root-relative `target`.
+            "target_path": str(service.root / adapter.relative_path) if adapter else None,
+            "test": (
+                None
+                if run is None
+                else {
+                    "result": "passed" if run.exit_code == 0 else "failed",
+                    "ran_at": run.timestamp,
+                    "stale": context.tests_stale,
+                }
+            ),
+            "warnings": warnings,
+            "written": written,
+        }
 
     @app.post("/v1/handoffs/preview")
     def preview(body: HandoffRequest) -> dict[str, Any]:
-        result = prepare(body)
-        return {
-            **asdict(result.handoff),
-            "target": result.adapter.relative_path if result.adapter else None,
-            "written": False,
-        }
+        nonlocal latest_preview
+        result, warnings = prepare(body)
+        preview_id = uuid.uuid4().hex
+        with handoff_lock:
+            latest_preview = (preview_id, body, result, warnings)
+        return {**handoff_payload(result, warnings, written=False), "preview_id": preview_id}
 
     @app.post("/v1/handoffs")
     def write_handoff(body: HandoffRequest) -> dict[str, Any]:
-        result = prepare(body)
-        committed = service.commit_handoff(result)
-        return {
-            **asdict(result.handoff),
-            "written": True,
-            "path": committed.written.relative_to(service.root).as_posix(),
-        }
+        nonlocal latest_preview
+        if body.preview_id:
+            with handoff_lock:
+                exclude = {"preview_id", "force"}
+                if (
+                    latest_preview is None
+                    or latest_preview[0] != body.preview_id
+                    or latest_preview[1].model_dump(exclude=exclude)
+                    != body.model_dump(exclude=exclude)
+                ):
+                    raise UserError(
+                        "This preview is no longer available. Preview again before writing."
+                    )
+                _, _, result, warnings = latest_preview
+                if result.adapter:
+                    result.adapter.force = body.force
+                committed = service.commit_handoff(result)
+                latest_preview = None
+        else:
+            result, warnings = prepare(body)
+            committed = service.commit_handoff(result)
+        payload = handoff_payload(result, warnings, written=True)
+        payload["path"] = committed.written.relative_to(service.root).as_posix()
+        return payload
 
     @app.get("/v1/openapi")
     def openapi() -> dict[str, Any]:

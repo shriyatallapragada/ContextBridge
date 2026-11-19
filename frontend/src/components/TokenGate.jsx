@@ -17,30 +17,48 @@ export default function TokenGate({ message, onAccept }) {
   };
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-950 px-4">
-      <form
-        onSubmit={submit}
-        className="w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-900/60 p-6 shadow-2xl"
-      >
-        <h1 className="text-base font-semibold text-zinc-100">ContextBridge dashboard</h1>
-        <p className="mt-2 text-sm leading-relaxed text-zinc-400">
-          Enter the session token printed by <code className="text-zinc-300">cb serve</code>. The
-          dashboard URL also carries it as <code className="text-zinc-300">#token=…</code> — opening
-          that URL is enough. The token stays in this browser&apos;s local storage.
+    <div className="flex min-h-screen items-center justify-center bg-page px-4 py-10">
+      <form onSubmit={submit} className="card w-full max-w-md" style={{ boxShadow: "var(--shadow-pop)" }}>
+        <div className="flex items-center gap-2">
+          <span
+            aria-hidden="true"
+            className="flex h-9 w-9 items-center justify-center rounded-control bg-sidebar text-sm font-bold text-on-dark"
+          >
+            CB
+          </span>
+          <h1 className="text-lg font-bold" style={{ color: "var(--red-chai)" }}>
+            ContextBridge dashboard
+          </h1>
+        </div>
+
+        <p className="mt-3 text-base leading-relaxed text-ink">
+          This is the <strong>session token</strong> printed by <code className="kbd">cb serve</code>{" "}
+          in your terminal — it only unlocks the local API on this machine. The dashboard URL also
+          carries it as <code className="kbd">#token=…</code>, so opening that link is enough.
+        </p>
+        <p className="hint mt-2">
+          Not to be confused with a provider API key: keys for Ollama or hosted APIs live in the
+          operating system keyring and never enter this browser.
         </p>
 
         {message && (
-          <p className="mt-3 rounded-lg border border-amber-800/60 bg-amber-950/40 px-3 py-2 text-xs text-amber-200">
+          <p className="mt-3 rounded-control border border-warn bg-warn-bg px-3 py-2 text-base text-warn">
+            <span aria-hidden="true" className="mr-1 font-bold">
+              ⚠
+            </span>
             {message}
           </p>
         )}
         {error && (
-          <p className="mt-3 rounded-lg border border-red-900/60 bg-red-950/40 px-3 py-2 text-xs text-red-200">
+          <p className="mt-3 rounded-control border border-danger bg-danger-bg px-3 py-2 text-base text-danger">
+            <span aria-hidden="true" className="mr-1 font-bold">
+              !
+            </span>
             {error}
           </p>
         )}
 
-        <label htmlFor="cb-token" className="mt-4 block text-xs font-medium text-zinc-400">
+        <label htmlFor="cb-token" className="label mt-4">
           Session token
         </label>
         <input
@@ -51,14 +69,15 @@ export default function TokenGate({ message, onAccept }) {
           placeholder="paste token…"
           autoComplete="off"
           spellCheck={false}
-          className="mt-1.5 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 font-mono text-sm text-zinc-200 outline-none transition focus:border-sky-600"
+          className="field mt-1.5 font-mono"
         />
-        <button
-          type="submit"
-          className="mt-4 w-full rounded-lg bg-sky-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-sky-500"
-        >
+        <button type="submit" className="btn btn-primary btn-block mt-4">
           Open dashboard
         </button>
+        <p className="hint mt-3">
+          Expired or rejected? Stop <code className="kbd">cb serve</code>, start it again and use the
+          new <code className="kbd">#token=…</code> URL it prints.
+        </p>
       </form>
     </div>
   );

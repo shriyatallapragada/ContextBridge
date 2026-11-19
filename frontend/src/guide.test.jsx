@@ -1,0 +1,360 @@
+import { render, screen, fireEvent, waitFor, act, within } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import ArchitectureTab from "./components/ArchitectureTab.jsx";
+import { mockFetch, setToken } from "./test-utils.js";
+
+// Minimal React Flow stand-in: captures props (so tests can drive
+// onNodeClick / onNodesChange) and renders nodes with their real card content.
+vi.mock("@xyflow/react", async () => {
+  const React = await import("react");
+
+  const applyNodeChanges = (changes, nodes) => {
+    let out = nodes;
+    for (const change of changes) {
+      if (change.type === "position" && change.position) {
+        out = out.map((node) =>
+          node.id === change.id
+            ? { ...node, position: change.position, dragging: change.dragging }
+            : node
+        );
+      } else if (change.type === "select") {
+        out = out.map((node) =>
+          node.id === change.id ? { ...node, selected: change.selected } : node
+        );
+      } else if (change.type === "remove") {
+        out = out.filter((node) => node.id !== change.id);
+      }
+    }
+    return out;
+  };
+
+  const ReactFlow = (props) => {
+    globalThis.__rfProps = props;
+    return React.createElement(
+      "div",
+      { "data-testid": "react-flow" },
+      props.nodes.map((node) => {
+        const Comp = props.nodeTypes?.[node.type];
+        return React.createElement(
+          "div",
+          {
+            key: node.id,
+            "data-testid": `rf-node-${node.id}`,
+            style: {
+              position: "absolute",
+              transform: `translate(${node.position.x}px, ${node.position.y}px)`,
+            },
+          },
+          Comp
+            ? React.createElement(Comp, {
+                id: node.id,
+                data: node.data,
+                selected: Boolean(node.selected),
+              })
+            : node.data?.label
+        );
+      }),
+      props.edges.map((edge) =>
+        React.createElement("div", { key: edge.id, "data-testid": `rf-edge-${edge.id}` }, edge.label ?? "")
+      )
+    );
+  };
+
+  return {
+    ReactFlow,
+    Handle: () => null,
+    Background: () => null,
+    Controls: () => null,
+    MiniMap: () => null,
+    Panel: ({ children }) => React.createElement(React.Fragment, null, children),
+    Position: { Left: "left", Right: "right", Top: "top", Bottom: "bottom" },
+    MarkerType: { ArrowClosed: "arrowclosed" },
+    BackgroundVariant: { Dots: "dots" },
+    applyNodeChanges,
+    applyEdgeChanges: (_, edges) => edges,
+  };
+});
+
+const META = {
+  shown_nodes: 3,
+  total_nodes: 30,
+  hidden_nodes: 27,
+  file_count: 30,
+  available_modules: ["src/server.js", "src/admin.js"],
+  entrypoints: ["src/server.js"],
+  connections_notice: "No static imports were found between these files.",
+  flow_notice: "Possible paths from a starting file, not a running request.",
+  entrypoint_support: "package main/bin and index/main files",
+};
+
+const OVERVIEW = {
+  view: "overview",
+  module: null,
+  nodes: [
+    {
+      id: "f1",
+      kind: "folder",
+      label: "Server",
+      path: "server",
+      group: "server",
+      purpose: "Not explained yet",
+      ai_explanation: null,
+      file_count: 3,
+      explained_files: 0,
+      related_files: ["server/a.py", "server/b.py", "server/c.py"],
+      depends_on: [],
+      used_by: ["ui/app.py: app"],
+      routes: [],
+    },
+    {
+      id: "f2",
+      kind: "folder",
+      label: "UI",
+      path: "ui",
+      group: "ui",
+      purpose: "Renders the dashboard screens",
+      ai_explanation: {
+        label: "AI-written",
+        text: "Coordinates rendering across the dashboard screens with shared components.",
+      },
+      file_count: 4,
+      explained_files: 1,
+      related_files: ["ui/app.py", "ui/widgets.py"],
+      depends_on: ["server: Server"],
+      used_by: ["index.html: entry"],
+      routes: [],
+    },
+  ],
+  edges: [{ source: "f1", target: "f2", kind: "imports", count: 1 }],
+  meta: META,
+};
+
+const MODULE_GRAPH = {
+  view: "module",
+  module: "src/server.js",
+  nodes: [
+    {
+      id: "n1",
+      kind: "file",
+      label: "server.js",
+      path: "src/server.js",
+      group: "src",
+      purpose: "Handles incoming requests",
+      ai_explanation: { label: "AI-written", text: "Handles incoming requests and routes them." },
+      related_files: ["src/app.js"],
+      depends_on: ["src/app.js: app"],
+      used_by: ["src/index.js: index"],
+      routes: ["/api/tasks"],
+      file_count: 1,
+      explained_files: 1,
+    },
+    {
+      id: "n2",
+      kind: "file",
+      label: "admin.js",
+      path: "src/admin.js",
+      group: "src",
+      purpose: "Admin screens",
+      ai_explanation: null,
+      related_files: [],
+      depends_on: ["src/server.js: server"],
+      used_by: [],
+      routes: [],
+      file_count: 1,
+      explained_files: 1,
+    },
+  ],
+  edges: [{ source: "n1", target: "n2", kind: "imports", count: 1 }],
+  meta: META,
+};
+
+const ADMIN_GRAPH = {
+  ...MODULE_GRAPH,
+  module: "src/admin.js",
+  nodes: [
+    { ...MODULE_GRAPH.nodes[1], id: "a1" },
+    { ...MODULE_GRAPH.nodes[0], id: "a2" },
+  ],
+  edges: [{ source: "a1", target: "a2", kind: "imports", count: 1 }],
+};
+
+function graphRoutes() {
+  return [
+    {
+      match: "/v1/graph",
+      body: (url) => {
+        const params = new URL(url, "http://localhost").searchParams;
+        if (params.get("view") === "module") {
+          return params.get("module") === "src/admin.js" ? ADMIN_GRAPH : MODULE_GRAPH;
+        }
+        if (params.get("view") === "flow") return { ...MODULE_GRAPH, view: "flow", module: null };
+        return OVERVIEW;
+      },
+    },
+  ];
+}
+
+describe("project guide graph", () => {
+  it("initialises the file selector from the top-level module field and stays in sync", async () => {
+    const { calls } = mockFetch(graphRoutes());
+    setToken();
+    render(<ArchitectureTab />);
+
+    await screen.findByText("Project overview");
+    fireEvent.click(screen.getByRole("button", { name: "Inside one file" }));
+
+    const select = await screen.findByLabelText("File");
+    await waitFor(() => expect(select.value).toBe("src/server.js"));
+
+    // Exactly one request built the view the selector displays — no refetch loop.
+    const moduleCalls = calls.filter((call) => {
+      const params = new URL(call.url, "http://localhost").searchParams;
+      return params.get("view") === "module" && !params.get("module");
+    });
+    expect(moduleCalls).toHaveLength(1);
+
+    // Choosing another file requests it, and the selector keeps showing it.
+    fireEvent.change(select, { target: { value: "src/admin.js" } });
+    await waitFor(() =>
+      expect(
+        calls.some((call) => {
+          const params = new URL(call.url, "http://localhost").searchParams;
+          return params.get("module") === "src/admin.js";
+        })
+      ).toBe(true)
+    );
+    expect(screen.getByLabelText("File").value).toBe("src/admin.js");
+    expect(await screen.findByTestId("rf-node-a1")).toBeInTheDocument();
+  });
+
+  it("keeps node drags in state and highlights selection", async () => {
+    mockFetch(graphRoutes());
+    setToken();
+    render(<ArchitectureTab />);
+
+    await screen.findByTestId("rf-node-f1");
+    const props = globalThis.__rfProps;
+
+    // Drag: onNodesChange must apply the position to state, not drop it.
+    act(() => {
+      props.onNodesChange([
+        { type: "position", id: "f1", position: { x: 640, y: 480 }, dragging: false },
+      ]);
+    });
+    await waitFor(() =>
+      expect(document.querySelector('[data-testid="rf-node-f1"]').style.transform).toBe(
+        "translate(640px, 480px)"
+      )
+    );
+
+    // Selection: change + click open the details panel with full information.
+    act(() => {
+      props.onNodesChange([{ type: "select", id: "f2", selected: true }]);
+      props.onNodeClick({}, { id: "f2" });
+    });
+
+    const details = await screen.findByLabelText("Details for UI");
+    expect(details).toBeInTheDocument();
+    expect(within(details).getByText("Renders the dashboard screens")).toBeInTheDocument();
+    expect(within(details).getByText("Coordinates rendering across the dashboard screens with shared components.")).toBeInTheDocument();
+    expect(within(details).getByText("AI-written")).toBeInTheDocument();
+    expect(within(details).getByText("ui")).toBeInTheDocument(); // full path, unclamped
+    expect(within(details).getByText("Uses")).toBeInTheDocument();
+    expect(within(details).getByText("Used by")).toBeInTheDocument();
+    expect(
+      document.querySelector('[data-testid="rf-node-f2"]').firstElementChild.getAttribute("style")
+    ).toContain("var(--focus)");
+  });
+
+  it("shows explanation, AI label, file count, coverage and an Explain action — without any model call on open", async () => {
+    const { calls } = mockFetch([
+      ...graphRoutes(),
+      {
+        match: "/v1/explain/notice",
+        body: {
+          text: "Explain the component using the configured provider. A small excerpt and its file names will be sent.",
+          requests: 3,
+          tokens: 5000,
+        },
+      },
+      {
+        match: "/v1/explain",
+        method: "POST",
+        status: 202,
+        body: { running: true },
+      },
+      {
+        match: "/v1/explain/status",
+        body: {
+          running: false,
+          done: true,
+          scope: "component",
+          summary: "Explained 3 files (2 from cache).",
+          messages: [{ text: "reused cache for server/a.py", at: "10:00:00" }],
+          cache_hits: 2,
+          requests_used: 3,
+          requests_budget: 3,
+          tokens_reserved: 5000,
+          warnings: [],
+        },
+      },
+    ]);
+    setToken();
+    render(<ArchitectureTab />);
+
+    // Opening/refreshing the graph makes ZERO explain calls.
+    await screen.findByTestId("rf-node-f1");
+    expect(calls.some((call) => call.url.includes("/v1/explain"))).toBe(false);
+
+    // Unexplained component card.
+    expect(screen.getByText("Not explained yet")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Explain" })).toBeInTheDocument();
+    expect(screen.getByText("3 files")).toBeInTheDocument();
+
+    // Explained component card: purpose, AI badge, file count, partial coverage.
+    expect(screen.getByText("Renders the dashboard screens")).toBeInTheDocument();
+    expect(screen.getByText("4 files")).toBeInTheDocument();
+    expect(screen.getByText("1 of 4 files explained")).toBeInTheDocument();
+    const aiBadges = screen.getAllByText("AI-written");
+    expect(aiBadges.length).toBeGreaterThanOrEqual(1);
+
+    // Explain flow: notice → explicit confirmation → POST → live status.
+    fireEvent.click(screen.getByRole("button", { name: "Explain" }));
+
+    const notice = await waitFor(() => {
+      const found = calls.find((call) => call.url.includes("/v1/explain/notice"));
+      expect(found).toBeTruthy();
+      return found;
+    });
+    expect(notice.url).toContain("scope=component");
+    expect(notice.url).toContain("component=server");
+
+    expect(
+      await screen.findByText(/A model request is about to be sent/)
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Max requests")).toHaveValue(3);
+    expect(screen.getByLabelText("Token budget")).toHaveValue(5000);
+    // Nothing has been sent yet.
+    expect(calls.some((call) => call.url === "/v1/explain")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Yes, explain it" }));
+
+    const post = await waitFor(() => {
+      const found = calls.find((call) => call.url === "/v1/explain" && call.method === "POST");
+      expect(found).toBeTruthy();
+      return found;
+    });
+    expect(post.body).toEqual({
+      confirm: true,
+      scope: "component",
+      component: "server",
+      max_requests: 3,
+      token_budget: 5000,
+    });
+
+    expect(await screen.findByText(/Explained 3 files/)).toBeInTheDocument();
+    expect(screen.getByText(/reused cache for server\/a.py/)).toBeInTheDocument();
+    expect(screen.getByText(/2 cache hits reused/)).toBeInTheDocument();
+    expect(screen.getByText(/Completed/)).toBeInTheDocument();
+  });
+});

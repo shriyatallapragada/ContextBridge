@@ -1,69 +1,71 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiRequest } from "../api.js";
-import { Badge, Card, EmptyState, ErrorBanner, Spinner, formatDate } from "./ui.jsx";
-import ChatBridge from "./ChatBridge.jsx";
+import { notifyDashboardStale } from "../events.js";
+import { Badge, Card, ConfirmDialog, EmptyState, ErrorBanner, InfoDot, Spinner, formatDate } from "./ui.jsx";
+import ChatImport from "./ChatImport.jsx";
 
 const FILTERS = [
   { id: "", label: "All" },
-  { id: "open", label: "Open" },
-  { id: "resolved", label: "Resolved" },
-  { id: "dismissed", label: "Dismissed" },
-  { id: "superseded", label: "Superseded" },
+  { id: "open", label: "Open", symbol: "○" },
+  { id: "resolved", label: "Resolved", symbol: "✓" },
+  { id: "dismissed", label: "Dismissed", symbol: "–" },
+  { id: "superseded", label: "Superseded", symbol: "↻" },
 ];
 
-const SOURCE_TONES = {
-  manual: "border-sky-800 bg-sky-950/60 text-sky-300",
-  chat: "border-violet-800 bg-violet-950/60 text-violet-300",
-  mcp: "border-emerald-800 bg-emerald-950/60 text-emerald-300",
-};
+const SUPERSEDED_HELP =
+  "Superseded means a newer task or decision replaced this one. It was neither completed nor thrown away.";
 
-const STATUS_TONES = {
-  resolved: "border-emerald-800 bg-emerald-950/60 text-emerald-300",
-  dismissed: "border-zinc-700 bg-zinc-900 text-zinc-400",
-  superseded: "border-amber-800 bg-amber-950/60 text-amber-300",
-};
+const SOURCE_TONES = { manual: "neutral", chat: "info", mcp: "ok" };
+const STATUS_TONES = { resolved: "ok", dismissed: "neutral", superseded: "warn" };
+const STATUS_SYMBOLS = { resolved: "✓", dismissed: "–", superseded: "↻" };
+
+const NOTE_TAGS = [
+  { id: "", label: "All notes" },
+  { id: "note", label: "Notes" },
+  { id: "decision", label: "Decisions" },
+  { id: "bug", label: "Bugs" },
+  { id: "blocker", label: "Blockers" },
+  { id: "architecture", label: "Architecture" },
+];
 
 function TaskRow({ task, busy, onStatus, onDelete }) {
   const resolved = task.status === "resolved";
-  const busyNote = busy === task.id ? "…" : "";
+  const busyHere = busy === task.id;
 
   return (
-    <li className="flex items-start gap-3 rounded-xl border border-zinc-800 bg-zinc-900/40 px-4 py-3 transition hover:border-zinc-700">
+    <li className="flex flex-wrap items-start gap-3 rounded-card border border-line bg-surface px-4 py-3 transition hover:border-accent sm:flex-nowrap">
       <input
         type="checkbox"
         checked={resolved}
-        disabled={busy === task.id}
+        disabled={busyHere}
         onChange={() => onStatus(task, resolved ? "open" : "resolved")}
+        aria-label={resolved ? `Reopen task: ${task.content}` : `Mark resolved: ${task.content}`}
         title={resolved ? "Reopen" : "Mark resolved"}
-        className="mt-0.5 h-4 w-4 shrink-0 rounded border-zinc-600 bg-zinc-950 accent-emerald-600 disabled:opacity-40"
+        className="mt-1 h-5 w-5 shrink-0 rounded-control border-line accent-[var(--primary)] disabled:opacity-40"
       />
       <div className="min-w-0 flex-1">
-        <p
-          className={`text-sm leading-relaxed ${
-            resolved ? "text-zinc-500 line-through" : "text-zinc-200"
-          }`}
-        >
+        <p className={`text-base leading-relaxed ${resolved ? "text-ink-muted line-through" : "text-ink"}`}>
           {task.content}
         </p>
-        <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
-          <Badge className={SOURCE_TONES[task.source] ?? SOURCE_TONES.manual}>
-            {task.source ?? "manual"}
-          </Badge>
+        <div className="mt-1.5 flex flex-wrap items-center gap-2 text-sm text-ink-muted">
+          <Badge tone={SOURCE_TONES[task.source] ?? "neutral"}>{task.source ?? "manual"}</Badge>
           {task.status !== "open" && (
-            <Badge className={STATUS_TONES[task.status] ?? STATUS_TONES.dismissed}>
-              {task.status}
-            </Badge>
+            <span title={task.status === "superseded" ? SUPERSEDED_HELP : undefined}>
+              <Badge tone={STATUS_TONES[task.status] ?? "neutral"} symbol={STATUS_SYMBOLS[task.status]}>
+                {task.status}
+              </Badge>
+            </span>
           )}
           <span>{formatDate(task.created_at)}</span>
         </div>
       </div>
-      <div className="flex shrink-0 items-center gap-1.5">
+      <div className="flex shrink-0 flex-wrap items-center gap-1.5">
         {task.status === "open" && (
           <button
             type="button"
-            disabled={busy === task.id}
+            disabled={busyHere}
             onClick={() => onStatus(task, "dismissed")}
-            className="rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-400 transition hover:border-zinc-500 hover:text-zinc-200 disabled:opacity-40"
+            className="btn btn-secondary"
           >
             Dismiss
           </button>
@@ -71,29 +73,221 @@ function TaskRow({ task, busy, onStatus, onDelete }) {
         {task.status !== "open" && task.status !== "resolved" && (
           <button
             type="button"
-            disabled={busy === task.id}
+            disabled={busyHere}
             onClick={() => onStatus(task, "open")}
-            className="rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-400 transition hover:border-zinc-500 hover:text-zinc-200 disabled:opacity-40"
+            className="btn btn-secondary"
           >
             Reopen
           </button>
         )}
         <button
           type="button"
-          disabled={busy === task.id}
+          disabled={busyHere}
           onClick={() => onDelete(task)}
-          aria-label="Delete task"
-          className="rounded-md border border-zinc-700 px-2 py-1 text-[11px] text-zinc-500 transition hover:border-red-800 hover:text-red-400 disabled:opacity-40"
+          aria-label={`Delete task: ${task.content}`}
+          className="btn btn-danger"
         >
-          Delete{busyNote}
+          {busyHere ? "Working…" : "Delete"}
         </button>
       </div>
     </li>
   );
 }
 
-// Checklist plus the Chat Bridge import box (fixed server-side parsing rules).
-export default function TasksTab() {
+function NotesPanel() {
+  const [tag, setTag] = useState("");
+  const [notes, setNotes] = useState([]);
+  const [counts, setCounts] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  const [text, setText] = useState("");
+  const [newTag, setNewTag] = useState("note");
+  const [adding, setAdding] = useState(false);
+  const [addError, setAddError] = useState(null);
+
+  const [pendingDelete, setPendingDelete] = useState(null);
+  const [deleting, setDeleting] = useState(false);
+  const [actionError, setActionError] = useState(null);
+  const seqRef = useRef(0);
+
+  // Newest request wins: a stale response can never overwrite a newer tag filter.
+  const load = useCallback(async () => {
+    const mySeq = (seqRef.current += 1);
+    setLoading(true);
+    setError(null);
+    try {
+      const query = `?limit=200${tag ? `&tag=${encodeURIComponent(tag)}` : ""}`;
+      const result = await apiRequest(`/v1/notes${query}`);
+      if (mySeq !== seqRef.current) return;
+      setNotes(result?.notes ?? []);
+      setCounts(result?.counts ?? {});
+    } catch (err) {
+      if (mySeq === seqRef.current) setError(err.message);
+    } finally {
+      if (mySeq === seqRef.current) setLoading(false);
+    }
+  }, [tag]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const addNote = async (event) => {
+    event.preventDefault();
+    const clean = text.trim();
+    if (!clean || adding) return;
+    setAdding(true);
+    setAddError(null);
+    try {
+      await apiRequest("/v1/notes", { method: "POST", body: { text: clean, tag: newTag } });
+      setText("");
+      notifyDashboardStale();
+      await load();
+    } catch (err) {
+      setAddError(err.message);
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!pendingDelete || deleting) return;
+    setDeleting(true);
+    setActionError(null);
+    try {
+      await apiRequest(`/v1/notes/${encodeURIComponent(pendingDelete.id)}`, { method: "DELETE" });
+      setPendingDelete(null);
+      notifyDashboardStale();
+      await load();
+    } catch (err) {
+      setActionError(err.message);
+      setPendingDelete(null);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  return (
+    <Card
+      title="Notes and decisions"
+      subtitle="Decisions, bugs, blockers and architecture notes stored in the local project database."
+    >
+      <div className="flex flex-wrap gap-2" role="group" aria-label="Filter notes by tag">
+        {NOTE_TAGS.map((option) => {
+          const count = option.id === "" ? counts.total : counts[option.id];
+          return (
+            <button
+              key={option.id || "all"}
+              type="button"
+              className="chip"
+              aria-pressed={tag === option.id}
+              onClick={() => setTag(option.id)}
+            >
+              {option.label}
+              {typeof count === "number" && <span className="tabular-nums">· {count}</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      <form onSubmit={addNote} className="mt-4 space-y-2">
+        <label className="label" htmlFor="cb-note-text">
+          New note
+        </label>
+        <textarea
+          id="cb-note-text"
+          className="field"
+          rows={3}
+          value={text}
+          maxLength={2000}
+          onChange={(event) => setText(event.target.value)}
+          placeholder="Decided to keep the explainer cache keyed by content hash…"
+        />
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="label mb-0" htmlFor="cb-note-tag">
+            Tag
+          </label>
+          <select
+            id="cb-note-tag"
+            className="field w-auto"
+            value={newTag}
+            onChange={(event) => setNewTag(event.target.value)}
+          >
+            {NOTE_TAGS.filter((option) => option.id).map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <button type="submit" className="btn btn-primary ml-auto" disabled={!text.trim() || adding}>
+            {adding ? "Adding…" : "Add note"}
+          </button>
+        </div>
+      </form>
+
+      <ErrorBanner message={addError} />
+      <ErrorBanner message={actionError} />
+
+      <div className="mt-4 space-y-2">
+        {loading ? (
+          <Spinner label="Loading notes…" />
+        ) : error ? (
+          <ErrorBanner message={error} onRetry={load} />
+        ) : notes.length === 0 ? (
+          <EmptyState
+            title={tag ? `No ${tag} notes yet` : "No notes yet"}
+            hint="Capture a decision, bug, blocker or architecture fact above — handoffs read these."
+          />
+        ) : (
+          <ul className="space-y-2">
+            {notes.map((note) => (
+              <li key={note.id} className="rounded-card border border-line bg-surface-alt px-3 py-2.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge tone="accent" symbol="#">
+                    {note.tag ?? "note"}
+                  </Badge>
+                  <span className="hint">{formatDate(note.created_at)}</span>
+                  <button
+                    type="button"
+                    className="btn btn-danger ml-auto"
+                    onClick={() => setPendingDelete(note)}
+                    aria-label={`Delete note: ${note.content.slice(0, 60)}`}
+                  >
+                    Delete
+                  </button>
+                </div>
+                <p className="mt-1.5 whitespace-pre-wrap text-base leading-relaxed text-ink">
+                  {note.content}
+                </p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {pendingDelete && (
+        <ConfirmDialog
+          title="Delete this note permanently?"
+          message={
+            <>
+              This removes the note from the local database. There is no undo and no backup copy:{" "}
+              <strong>{pendingDelete.content.slice(0, 160)}</strong>
+              {pendingDelete.content.length > 160 ? "…" : ""}
+            </>
+          }
+          confirmLabel="Delete permanently"
+          busy={deleting}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={confirmDelete}
+        />
+      )}
+    </Card>
+  );
+}
+
+// Task checklist plus notes/decisions and the chat-import box.
+export default function TasksTab({ onNavigate }) {
   const [filter, setFilter] = useState("");
   const [tasks, setTasks] = useState([]);
   const [counts, setCounts] = useState({});
@@ -106,25 +300,35 @@ export default function TasksTab() {
 
   const [busy, setBusy] = useState(null);
   const [actionError, setActionError] = useState(null);
+  const [pendingDelete, setPendingDelete] = useState(null);
+  const seqRef = useRef(0);
 
+  // Newest request wins: switching filters fast cannot show an old list.
   const load = useCallback(async (status) => {
+    const mySeq = (seqRef.current += 1);
     setLoading(true);
     setError(null);
     try {
       const query = status ? `?status=${encodeURIComponent(status)}&limit=200` : "?limit=200";
       const result = await apiRequest(`/v1/tasks${query}`);
-      setTasks(result.tasks ?? []);
-      setCounts(result.counts ?? {});
+      if (mySeq !== seqRef.current) return;
+      setTasks(result?.tasks ?? []);
+      setCounts(result?.counts ?? {});
     } catch (err) {
-      setError(err.message);
+      if (mySeq === seqRef.current) setError(err.message);
     } finally {
-      setLoading(false);
+      if (mySeq === seqRef.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     load(filter);
   }, [load, filter]);
+
+  const afterMutation = async () => {
+    notifyDashboardStale();
+    await load(filter);
+  };
 
   const addTask = async (event) => {
     event.preventDefault();
@@ -135,7 +339,7 @@ export default function TasksTab() {
     try {
       await apiRequest("/v1/tasks", { method: "POST", body: { content: clean } });
       setDraft("");
-      await load(filter);
+      await afterMutation();
     } catch (err) {
       setAddError(err.message);
     } finally {
@@ -144,6 +348,7 @@ export default function TasksTab() {
   };
 
   const changeStatus = async (task, status) => {
+    if (busy) return;
     setBusy(task.id);
     setActionError(null);
     try {
@@ -151,7 +356,7 @@ export default function TasksTab() {
         method: "PATCH",
         body: { status },
       });
-      await load(filter);
+      await afterMutation();
     } catch (err) {
       setActionError(err.message);
     } finally {
@@ -159,12 +364,15 @@ export default function TasksTab() {
     }
   };
 
-  const deleteTask = async (task) => {
+  const confirmDelete = async () => {
+    const task = pendingDelete;
+    if (!task || busy) return;
     setBusy(task.id);
     setActionError(null);
+    setPendingDelete(null);
     try {
       await apiRequest(`/v1/tasks/${encodeURIComponent(task.id)}`, { method: "DELETE" });
-      await load(filter);
+      await afterMutation();
     } catch (err) {
       setActionError(err.message);
     } finally {
@@ -173,85 +381,118 @@ export default function TasksTab() {
   };
 
   return (
-    <div className="grid gap-6 lg:grid-cols-3">
-      {/* Checklist */}
-      <div className="space-y-4 lg:col-span-2">
-        <div className="flex flex-wrap items-center gap-2">
-          {FILTERS.map((option) => {
-            const active = filter === option.id;
-            const count =
-              option.id === ""
-                ? counts.total
-                : counts[option.id];
-            return (
-              <button
-                key={option.id || "all"}
-                type="button"
-                onClick={() => setFilter(option.id)}
-                className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
-                  active
-                    ? "border-sky-600 bg-sky-600/15 text-sky-300"
-                    : "border-zinc-700 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
-                }`}
-              >
-                {option.label}
-                {typeof count === "number" && <span className="ml-1.5 tabular-nums opacity-70">{count}</span>}
-              </button>
-            );
-          })}
+    <div className="space-y-6">
+      <div className="grid gap-6 lg:grid-cols-3">
+        {/* Checklist */}
+        <div className="space-y-4 lg:col-span-2">
+          <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filter tasks">
+            {FILTERS.map((option) => {
+              const active = filter === option.id;
+              const count = option.id === "" ? counts.total : counts[option.id];
+              return (
+                <span key={option.id || "all"} className="inline-flex items-center gap-1">
+                  <button
+                    type="button"
+                    className="chip"
+                    aria-pressed={active}
+                    onClick={() => setFilter(option.id)}
+                  >
+                    {option.symbol && (
+                      <span aria-hidden="true" className="font-bold">
+                        {option.symbol}
+                      </span>
+                    )}
+                    {option.label}
+                    {typeof count === "number" && <span className="tabular-nums">· {count}</span>}
+                  </button>
+                  {option.id === "superseded" && <InfoDot label={SUPERSEDED_HELP} />}
+                </span>
+              );
+            })}
+          </div>
+          <p className="hint">
+            <strong>Superseded</strong> means a newer task replaced this one — it was neither
+            completed nor discarded.
+          </p>
+
+          <form onSubmit={addTask} className="flex gap-2">
+            <input
+              type="text"
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              maxLength={600}
+              placeholder="Add a task…"
+              aria-label="New task"
+              className="field min-w-0 flex-1"
+            />
+            <button
+              type="submit"
+              disabled={!draft.trim() || adding}
+              className="btn btn-primary shrink-0"
+            >
+              {adding ? "Adding…" : "Add"}
+            </button>
+          </form>
+
+          <ErrorBanner message={addError} />
+          <ErrorBanner message={actionError} />
+
+          {loading ? (
+            <Spinner label="Loading tasks…" />
+          ) : error ? (
+            <ErrorBanner message={error} onRetry={() => load(filter)} />
+          ) : tasks.length === 0 ? (
+            <EmptyState
+              title={filter ? `No ${filter} tasks` : "No tasks yet"}
+              hint="Add one above, or paste a chat transcript into “Import tasks from text” on the right."
+            />
+          ) : (
+            <ul className="space-y-2">
+              {tasks.map((task) => (
+                <TaskRow
+                  key={task.id}
+                  task={task}
+                  busy={busy}
+                  onStatus={changeStatus}
+                  onDelete={(item) => setPendingDelete(item)}
+                />
+              ))}
+            </ul>
+          )}
         </div>
 
-        <form onSubmit={addTask} className="flex gap-2">
-          <input
-            type="text"
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            maxLength={600}
-            placeholder="Add a task…"
-            className="min-w-0 flex-1 rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-200 outline-none transition focus:border-sky-600"
-          />
-          <button
-            type="submit"
-            disabled={!draft.trim() || adding}
-            className="shrink-0 rounded-xl bg-sky-600 px-4 py-2.5 text-sm font-medium text-white transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-40"
+        {/* Notes + import */}
+        <div className="space-y-6">
+          <NotesPanel />
+
+          <Card
+            title="Import tasks from text"
+            actions={
+              <button type="button" className="btn btn-secondary" onClick={() => onNavigate?.("chat")}>
+                Chat bridge →
+              </button>
+            }
           >
-            {adding ? "Adding…" : "Add"}
-          </button>
-        </form>
-
-        <ErrorBanner message={addError} />
-        <ErrorBanner message={actionError} />
-
-        {loading ? (
-          <Spinner label="Loading tasks…" />
-        ) : error ? (
-          <ErrorBanner message={error} onRetry={() => load(filter)} />
-        ) : tasks.length === 0 ? (
-          <EmptyState
-            title={filter ? `No ${filter} tasks` : "No tasks yet"}
-            hint="Add one above, or paste a chat transcript into the Chat Bridge on the right."
-          />
-        ) : (
-          <ul className="space-y-2">
-            {tasks.map((task) => (
-              <TaskRow
-                key={task.id}
-                task={task}
-                busy={busy}
-                onStatus={changeStatus}
-                onDelete={deleteTask}
-              />
-            ))}
-          </ul>
-        )}
+            <ChatImport onSaved={() => load(filter)} />
+          </Card>
+        </div>
       </div>
 
-      {/* Chat Bridge */}
-      <div>
-        <Card title="Chat Bridge">
-          <ChatBridge onImported={() => load(filter)} />
-        </Card>
-      </div>
+      {pendingDelete && (
+        <ConfirmDialog
+          title="Delete this task permanently?"
+          message={
+            <>
+              The task is removed from the local list — no undo:{" "}
+              <strong>{pendingDelete.content}</strong>
+            </>
+          }
+          confirmLabel="Delete task"
+          busy={Boolean(busy)}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={confirmDelete}
+        />
+      )}
     </div>
   );
 }
