@@ -38,7 +38,8 @@ export default function TokenGate({ message, onAccept }) {
         </p>
         <p className="hint mt-2">
           Not to be confused with a provider API key: keys for Ollama or hosted APIs live in the
-          operating system keyring and never enter this browser.
+          system keychain. Saved keys are never sent back to the browser; new keys pass through
+          the Settings form to reach the keychain.
         </p>
 
         {message && (

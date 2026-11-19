@@ -31,7 +31,7 @@ function explainBody(target, budgets) {
 // flow: notice → privacy confirmation (budgets) → POST /v1/explain {confirm}
 //       → poll /v1/explain/status → progress / stopped / completed / failed
 //       → Resume/Retry re-POSTs (the server resumes from its cache).
-export default function ExplainDialog({ target, onClose, onFinished }) {
+export default function ExplainDialog({ target, onClose, onFinished, onOpenSettings }) {
   const [phase, setPhase] = useState("notice"); // notice | confirm | running | done | stopped | failed
   const [notice, setNotice] = useState(null);
   const [noticeError, setNoticeError] = useState(null);
@@ -179,7 +179,14 @@ export default function ExplainDialog({ target, onClose, onFinished }) {
         {phase === "notice" && <Spinner label="Preparing the privacy notice…" />}
 
         {(phase === "failed" && noticeError && !notice) || noticeError ? (
-          <ErrorBanner message={noticeError} onRetry={loadNotice} />
+          <div className="space-y-3">
+            <ErrorBanner message={noticeError} />
+            <div className="flex flex-wrap gap-2">
+              <button type="button" className="btn btn-secondary" onClick={loadNotice}>Retry</button>
+              <button type="button" className="btn btn-secondary" onClick={onOpenSettings}>Open Settings</button>
+              <button type="button" className="btn btn-secondary" onClick={onClose}>Close</button>
+            </div>
+          </div>
         ) : null}
 
         {notice && (phase === "confirm" || phase === "stopped" || phase === "failed") && (

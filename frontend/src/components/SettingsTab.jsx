@@ -22,7 +22,7 @@ const MODES = [
     provider: "openai-compatible",
     title: "Hosted-compatible API",
     blurb:
-      "An OpenAI-compatible endpoint you have an account with. The API key lives in the OS keyring on this machine — never in this browser.",
+      "An OpenAI-compatible endpoint you have an account with. Saved keys stay in the system keychain and are never sent back to the browser.",
   },
 ];
 
@@ -131,7 +131,7 @@ export default function SettingsTab({ onNavigate }) {
       <form onSubmit={save} className="space-y-6">
         <Card
           title="Model mode"
-          subtitle="Choose where model requests go. Switching any choice here never exposes a key to the browser."
+          subtitle="Choose where model requests go. Saved keys are never sent back to the browser."
         >
           <fieldset>
             <legend className="label mb-2">Mode</legend>
@@ -222,8 +222,8 @@ export default function SettingsTab({ onNavigate }) {
               )}
             </p>
             <p className="hint mt-1">
-              Keys are saved only to the operating system keyring. Saved keys are never sent back
-              to the browser or stored in browser storage.
+              Saved keys are never sent back to the browser or stored in browser storage.
+              A newly typed key passes through this form to reach the system keychain.
             </p>
           </div>
 
@@ -299,8 +299,8 @@ export default function SettingsTab({ onNavigate }) {
           <div className="rounded-card border border-line bg-surface-alt px-4 py-3">
             <p className="font-bold">Provider API key (the model)</p>
             <p className="hint mt-1">
-              Lets the <em>server</em> call Ollama or a hosted API. Held in the OS keyring and never
-              sent to this browser — there is no field for it here on purpose.
+              Lets the <em>server</em> call Ollama or a hosted API. Saved keys are held in the system
+              keychain; new keys are submitted through the hosted API form above.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">

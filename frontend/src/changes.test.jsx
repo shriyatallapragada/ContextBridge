@@ -2,8 +2,9 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import ChangesTestsTab from "./components/ChangesTestsTab.jsx";
 import { mockFetch, setToken } from "./test-utils.js";
+import { formatDate } from "./components/ui.jsx";
 
-function routes({ statusStates }) {
+function routes({ statusStates, runs = [] }) {
   let statusIndex = 0;
   return [
     {
@@ -41,7 +42,7 @@ function routes({ statusStates }) {
         return state;
       },
     },
-    { match: "/v1/tests/history", body: { runs: [], last_run_age_seconds: 900, stale: false } },
+    { match: "/v1/tests/history", body: { runs, last_run_age_seconds: 900, stale: false } },
   ];
 }
 
@@ -69,6 +70,54 @@ const FINISHED = {
 };
 
 describe("test run polling", () => {
+  it("shows exit 1 with unknown counts as failed in the live report and recorded history", async () => {
+    const report = { exit_code: 1, passed: null, failed: null, skipped: null, recognized: false };
+    const ranAt = "2026-11-18T09:15:00Z";
+    mockFetch(routes({
+      statusStates: [{ running: false, report }],
+      runs: [{ ...report, ran_at: ranAt }],
+    }));
+    setToken();
+    render(<ChangesTestsTab />);
+    await screen.findByDisplayValue("npm run test");
+    fireEvent.click(screen.getByText("1 recorded run", { selector: "summary" }));
+    expect(screen.getByText(formatDate(ranAt))).toBeVisible();
+    expect(screen.getByText("✗ Failed · Test counts unavailable")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /Run tests/ }));
+    expect(await screen.findByText("Failed", { selector: "span" })).toBeInTheDocument();
+    expect(screen.getByText("Test counts unavailable", { exact: true })).toBeInTheDocument();
+    expect(screen.getByText("exit 1")).toBeInTheDocument();
+    expect(screen.queryByText(/0 passed|✓ passed/i)).not.toBeInTheDocument();
+    expect(screen.queryByText("Passed", { exact: true })).not.toBeInTheDocument();
+  });
+
+  it("shows a clear fallback when a history timestamp is missing", async () => {
+    mockFetch(routes({ statusStates: [], runs: [{ exit_code: 1, passed: null, failed: null, skipped: null }] }));
+    setToken();
+    render(<ChangesTestsTab />);
+    await screen.findByDisplayValue("npm run test");
+    fireEvent.click(screen.getByText("1 recorded run", { selector: "summary" }));
+    expect(screen.getByText("Time unavailable")).toBeVisible();
+    expect(screen.getByText("✗ Failed · Test counts unavailable")).toBeVisible();
+  });
+
+  it("preserves a normal passing run and its recorded time", async () => {
+    const report = { exit_code: 0, passed: 12, failed: 0, skipped: 1, recognized: true };
+    const ranAt = "2026-11-18T10:15:00Z";
+    mockFetch(routes({ statusStates: [{ running: false, report }], runs: [{ ...report, ran_at: ranAt }] }));
+    setToken();
+    render(<ChangesTestsTab />);
+    await screen.findByDisplayValue("npm run test");
+    fireEvent.click(screen.getByText("1 recorded run", { selector: "summary" }));
+    expect(screen.getByText(formatDate(ranAt))).toBeVisible();
+    expect(screen.getByText("✓ Passed · 12 passed · 0 failed · 1 skipped")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /Run tests/ }));
+    expect(await screen.findByText("Passed", { exact: true })).toBeInTheDocument();
+    expect(screen.getByText("12 passed", { exact: true })).toBeInTheDocument();
+    expect(screen.getByText("exit 0")).toBeInTheDocument();
+    expect(screen.queryByText(/unavailable/)).not.toBeInTheDocument();
+  });
+
   it("polls a running command and renders the report counts when finished", async () => {
     const { calls } = mockFetch(routes({ statusStates: [RUNNING, FINISHED] }));
     setToken();

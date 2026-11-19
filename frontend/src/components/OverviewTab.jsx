@@ -254,7 +254,7 @@ export default function OverviewTab({ onNavigate }) {
         ) : (
           <EmptyState
             title="No project goal yet"
-            hint="Describe, in one sentence, what this project is trying to achieve. It persists in SQLite across sessions and is included in handoffs."
+            hint="Choose Set project goal to describe what this project is trying to achieve."
             action={
               <button
                 type="button"
@@ -342,6 +342,7 @@ export default function OverviewTab({ onNavigate }) {
               </button>
             }
           >
+            {!counts.total && <p className="hint mb-3">No tasks yet. Open the checklist to add your first one.</p>}
             <div className="space-y-2">
               {TASK_STATUSES.map((status) => (
                 <button

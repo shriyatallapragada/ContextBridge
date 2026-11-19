@@ -237,7 +237,7 @@ function NotesPanel() {
         ) : notes.length === 0 ? (
           <EmptyState
             title={tag ? `No ${tag} notes yet` : "No notes yet"}
-            hint="Capture a decision, bug, blocker or architecture fact above — handoffs read these."
+            hint="Add your first note above."
           />
         ) : (
           <ul className="space-y-2">
@@ -444,7 +444,7 @@ export default function TasksTab({ onNavigate }) {
           ) : tasks.length === 0 ? (
             <EmptyState
               title={filter ? `No ${filter} tasks` : "No tasks yet"}
-              hint="Add one above, or paste a chat transcript into “Import tasks from text” on the right."
+              hint={filter ? "Choose another status, or add a new task above." : "Add your first task above, or import tasks from a chat."}
             />
           ) : (
             <ul className="space-y-2">

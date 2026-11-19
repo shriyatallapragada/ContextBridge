@@ -195,6 +195,34 @@ function graphRoutes() {
 }
 
 describe("project guide graph", () => {
+  it("lets offline users retry, close, or open Settings from the provider error", async () => {
+    const onNavigate = vi.fn();
+    const { calls } = mockFetch([
+      ...graphRoutes(),
+      { match: "/v1/explain/notice", status: 400, body: { detail: "Choose a model provider in Settings. The overview works offline." } },
+    ]);
+    setToken();
+    render(<ArchitectureTab onNavigate={onNavigate} />);
+    await screen.findByText("Not explained yet");
+    fireEvent.click(screen.getByRole("button", { name: "Explain project" }));
+    const dialog = await screen.findByRole("dialog");
+    await within(dialog).findByText(/Choose a model provider/);
+    expect(within(dialog).getByRole("button", { name: "Close" })).toBeVisible();
+    expect(within(dialog).getByRole("button", { name: "Open Settings" })).toBeVisible();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Retry" }));
+    await within(dialog).findByText(/Choose a model provider/);
+    expect(calls.filter((call) => call.url.includes("/v1/explain/notice"))).toHaveLength(2);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(onNavigate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Explain project" }));
+    await screen.findByText(/Choose a model provider/);
+    fireEvent.click(screen.getByRole("button", { name: "Open Settings" }));
+    expect(onNavigate).toHaveBeenCalledWith("settings");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(calls.some((call) => call.url === "/v1/explain")).toBe(false);
+  });
+
   it("initialises the file selector from the top-level module field and stays in sync", async () => {
     const { calls } = mockFetch(graphRoutes());
     setToken();

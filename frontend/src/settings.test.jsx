@@ -26,7 +26,8 @@ describe("settings", () => {
     expect(await screen.findByText("Works without a model")).toBeInTheDocument();
     // has_api_key indicator without exposing anything.
     expect(screen.getByText("configured on this machine")).toBeInTheDocument();
-    expect(screen.getByText(/never sent back/)).toBeInTheDocument();
+    expect(screen.getByText(/A newly typed key passes through this form to reach the system keychain/)).toBeInTheDocument();
+    expect(screen.queryByText(/never in this browser|never exposes a key|no field for it here/i)).not.toBeInTheDocument();
 
     // No API key field exists at all — only session token wording.
     expect(screen.queryByRole("textbox", { name: /api key/i })).not.toBeInTheDocument();
@@ -67,6 +68,9 @@ describe("settings", () => {
     render(<SettingsTab />);
 
     await screen.findByText("Works without a model");
+    expect(screen.getByLabelText(/Provider API key \(leave blank/)).toBeInTheDocument();
+    expect(screen.getByText(/Saved keys are never sent back to the browser or stored in browser storage/)).toBeInTheDocument();
+    expect(screen.getByText(/A newly typed key passes through this form/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Test connection" }));
 
     expect(await screen.findByText("Enter the model name to check.")).toBeInTheDocument();

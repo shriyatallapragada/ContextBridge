@@ -38,9 +38,28 @@ function ChangeRow({ file }) {
   );
 }
 
+function commandOutcome(run) {
+  if ((typeof run.exit_code === "number" && run.exit_code !== 0) || run.failed > 0) {
+    return { label: "Failed", tone: "danger", symbol: "✗" };
+  }
+  if (run.exit_code === 0) return { label: "Passed", tone: "ok", symbol: "✓" };
+  return { label: "Status unavailable", tone: "neutral", symbol: "?" };
+}
+
+function countLabels(run) {
+  const kinds = ["passed", "failed", "skipped"];
+  if (run.recognized === false || kinds.every((kind) => typeof run[kind] !== "number")) {
+    return ["Test counts unavailable"];
+  }
+  return kinds.map((kind) =>
+    typeof run[kind] === "number" ? `${run[kind]} ${kind}` : `${kind} count unavailable`
+  );
+}
+
 function TestReport({ status, history }) {
   const report = status?.report ?? null;
   const running = Boolean(status?.running);
+  const outcome = report ? commandOutcome(report) : null;
 
   return (
     <div className="space-y-3">
@@ -51,18 +70,12 @@ function TestReport({ status, history }) {
           </Badge>
         ) : report ? (
           <>
-            <Badge tone={report.failed > 0 ? "danger" : "ok"} symbol={report.failed > 0 ? "✗" : "✓"}>
-              {report.failed > 0 ? "Failed" : "Passed"}
+            <Badge tone={outcome.tone} symbol={outcome.symbol}>
+              {outcome.label}
             </Badge>
-            <Badge tone="ok" symbol="+">
-              {report.passed ?? 0} passed
-            </Badge>
-            <Badge tone={report.failed > 0 ? "danger" : "neutral"} symbol="−">
-              {report.failed ?? 0} failed
-            </Badge>
-            <Badge tone="neutral" symbol="⊘">
-              {report.skipped ?? 0} skipped
-            </Badge>
+            {countLabels(report).map((label) => (
+              <Badge key={label} tone="neutral">{label}</Badge>
+            ))}
             {report.runner && <Badge tone="neutral">{report.runner}</Badge>}
             {typeof report.exit_code === "number" && (
               <Badge tone={report.exit_code === 0 ? "ok" : "danger"} symbol={report.exit_code === 0 ? "✓" : "✗"}>
@@ -129,14 +142,20 @@ function TestReport({ status, history }) {
             {history.runs.length} recorded run{history.runs.length === 1 ? "" : "s"}
           </summary>
           <ul className="mt-2 space-y-1 text-base text-ink-muted">
-            {history.runs.slice(0, 10).map((run, index) => (
-              <li key={run.id ?? index} className="flex flex-wrap gap-2">
-                <span className="font-mono text-sm">{formatDate(run.started_at ?? run.finished_at)}</span>
-                <span>
-                  {run.failed > 0 ? `✗ ${run.failed} failed` : "✓ passed"} · {run.passed ?? 0} passed
-                </span>
-              </li>
-            ))}
+            {history.runs.slice(0, 10).map((run, index) => {
+              const outcome = commandOutcome(run);
+              const timestamp = run.ran_at ?? run.started_at ?? run.finished_at;
+              return (
+                <li key={run.id ?? index} className="flex flex-wrap gap-2">
+                  <span className="font-mono text-sm">
+                    {timestamp ? formatDate(timestamp) : "Time unavailable"}
+                  </span>
+                  <span>
+                    {outcome.symbol} {outcome.label} · {countLabels(run).join(" · ")}
+                  </span>
+                </li>
+              );
+            })}
           </ul>
         </details>
       )}
@@ -379,7 +398,7 @@ export default function ChangesTestsTab() {
             ) : files.length === 0 ? (
               <EmptyState
                 title="Clean working tree"
-                hint="No modified, added or untracked files in this project right now."
+                hint="Edit a project file, then press Refresh to see the change."
               />
             ) : (
               <>

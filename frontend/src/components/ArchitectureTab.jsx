@@ -299,7 +299,7 @@ function NodeDetails({ node, onClose, onExplain }) {
 }
 
 // Deterministic AST graph from GET /v1/graph, rendered with React Flow.
-export default function ArchitectureTab() {
+export default function ArchitectureTab({ onNavigate }) {
   const [view, setView] = useState("overview");
   const [requestModule, setRequestModule] = useState(""); // "" → server default
   const [selected, setSelected] = useState(""); // what the selector displays
@@ -460,6 +460,15 @@ export default function ArchitectureTab() {
 
   const onExplainFinished = () => setReloadKey((key) => key + 1);
 
+  const initialViewport = useMemo(() => {
+    const positions = [...computePositions(graph?.nodes ?? [], graph?.edges ?? []).values()];
+    return {
+      x: 32 - Math.min(0, ...positions.map((position) => position.x)),
+      y: 32 - Math.min(0, ...positions.map((position) => position.y)),
+      zoom: 1,
+    };
+  }, [graph]);
+
   const emptyNotice =
     meta.notice ||
     (view === "flow"
@@ -584,20 +593,15 @@ export default function ArchitectureTab() {
       ) : graph && (graph.nodes ?? []).length === 0 ? (
         <EmptyState
           title={view === "flow" ? "No request path to show yet" : "No files to show yet"}
-          hint={emptyNotice}
-          action={
-            view === "flow" ? (
-              <span className="hint">
-                Pick a starting file above to explore its detected imports.
-              </span>
-            ) : null
-          }
+          hint={`${emptyNotice} ${view === "flow"
+            ? "Pick a starting file above to explore its detected imports."
+            : "Add source files to this project, then reopen the project guide."}`}
         />
       ) : rfNodes.length === 0 ? (
         <Spinner label="Laying out graph…" />
       ) : (
         <div className="flex flex-col gap-4 lg:flex-row">
-          <div className="min-w-0 flex-1 overflow-hidden rounded-card border border-line bg-page" style={{ height: 560 }}>
+          <div className="project-graph min-w-0 flex-1 overflow-hidden rounded-card border border-line bg-page" style={{ height: 560 }}>
             <ReactFlow
               key={`${view}|${requestModule}|${reloadKey}`}
               nodes={rfNodes}
@@ -605,10 +609,12 @@ export default function ArchitectureTab() {
               nodeTypes={nodeTypes}
               onNodesChange={(changes) => setRfNodes((current) => applyNodeChanges(changes, current))}
               onEdgesChange={(changes) => setRfEdges((current) => applyEdgeChanges(changes, current))}
-              fitView
-              fitViewOptions={{ padding: 0.25 }}
-              minZoom={0.3}
+              defaultViewport={initialViewport}
+              minZoom={1}
               maxZoom={1.8}
+              panOnScroll
+              panOnDrag
+              zoomOnScroll={false}
               nodesDraggable
               nodesConnectable={false}
               elementsSelectable
@@ -701,6 +707,10 @@ export default function ArchitectureTab() {
           target={explainTarget}
           onClose={() => setExplainTarget(null)}
           onFinished={onExplainFinished}
+          onOpenSettings={() => {
+            setExplainTarget(null);
+            onNavigate?.("settings");
+          }}
         />
       )}
     </div>

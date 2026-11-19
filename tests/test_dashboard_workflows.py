@@ -4,11 +4,13 @@ from pathlib import Path
 from threading import Event
 from time import monotonic, sleep
 
+import pytest
 from fastapi.testclient import TestClient
 
 from contextbridge.local_api import create_app
 from contextbridge.providers.settings import ProviderSettingsService, ProviderStatus
 from contextbridge.service import ProjectService
+from contextbridge.storage.db import parse_utc
 
 
 def client_for(root: Path) -> TestClient:
@@ -86,6 +88,29 @@ def test_changes_command_and_settings(git_repo: Path, monkeypatch) -> None:
             json={"provider": "ollama", "model": "exact-model", "api_key": "private-test-value"},
         )
         assert probe.json()["ok"] and "private-test-value" not in probe.text
+
+
+@pytest.mark.parametrize(
+    ("command", "exit_code", "counts", "recognized"),
+    [
+        ("exit 1", 1, (None, None, None), False),
+        ("echo '=== 12 passed, 1 skipped in 0.01s ==='", 0, (12, 0, 1), True),
+    ],
+)
+def test_command_report_and_history_contract(
+    git_repo: Path, command: str, exit_code: int, counts: tuple, recognized: bool
+) -> None:
+    with client_for(git_repo) as client:
+        assert client.post("/v1/tests/run", json={"command": command}).status_code == 202
+        report = finished(client, "/v1/tests/status")["report"]
+        assert report["exit_code"] == exit_code
+        assert report["recognized"] is recognized
+        assert tuple(report[key] for key in ("passed", "failed", "skipped")) == counts
+        run = client.get("/v1/tests/history").json()["runs"][0]
+        assert run["command"] == command
+        assert run["exit_code"] == exit_code
+        assert tuple(run[key] for key in ("passed", "failed", "skipped")) == counts
+        assert parse_utc(run["ran_at"]).tzinfo is not None
 
 
 def test_explanation_confirmation_progress_and_resume(git_repo: Path, monkeypatch) -> None:

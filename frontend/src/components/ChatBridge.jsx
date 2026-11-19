@@ -262,7 +262,7 @@ function ConversationHandoff({ incomingText }) {
       {!result && !busy && (
         <EmptyState
           title="No handoff yet"
-          hint="Paste a conversation above and press Preview. The server condenses it deterministically — sections like Goal, Done, Decisions, Current state, Open problems, Next steps and Files."
+          hint="Paste a conversation above and press Preview handoff."
         />
       )}
     </div>

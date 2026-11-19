@@ -119,7 +119,7 @@ function ProjectHeader({ project }) {
               {data.project || "Untitled project"}
             </p>
             <p
-              className="mt-0.5 break-all font-mono text-sm leading-snug text-on-dark-muted"
+              className="mt-0.5 truncate font-mono text-sm leading-snug text-on-dark-muted"
               title={data.root || ""}
             >
               {data.root || "Path unavailable"}

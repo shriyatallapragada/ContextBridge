@@ -371,7 +371,7 @@ export default function HandoffTab() {
           ) : (
             <EmptyState
               title="No preview yet"
-              hint="Choose a destination and press Preview. The handoff is assembled from local SQLite, git and the file map — deterministic unless polishing is switched on."
+              hint="Choose a destination above and press Preview."
             />
           )}
 
