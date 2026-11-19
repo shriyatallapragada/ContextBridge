@@ -53,6 +53,7 @@ export function Notice({ children, tone = "info" }) {
 export function EmptyState({ title, hint, action }) {
   return (
     <div className="rounded-card border border-dashed border-line bg-surface-alt/60 px-6 py-10 text-center">
+      <img src={`${import.meta.env.BASE_URL}welcome.svg`} alt="" aria-hidden="true" className="mx-auto mb-3 h-16 w-16" loading="lazy" />
       <p className="text-base font-semibold text-ink">{title}</p>
       {hint && <p className="mx-auto mt-2 max-w-xl text-base leading-relaxed text-ink-muted">{hint}</p>}
       {action && <div className="mt-4 flex flex-wrap justify-center gap-2">{action}</div>}

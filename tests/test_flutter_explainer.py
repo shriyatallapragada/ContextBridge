@@ -61,7 +61,8 @@ def test_cached_component_description_is_hash_matched_and_labeled(flutter):
     ]
     model = scan_project(flutter, explanations=explanations)
     component = next(n for n in graph_view(model)["nodes"] if n["path"] == "lib/data")
-    assert component["purpose"] == "Not explained yet"
+    assert component["purpose_source"] == "automatic"
+    assert "Flutter data" in component["purpose"]
     from contextbridge.project_map import _component_groups, component_digest
 
     members = _component_groups(

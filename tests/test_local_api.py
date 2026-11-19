@@ -105,6 +105,30 @@ def test_non_loopback_bind_is_rejected(tmp_path, host):
         run_server(tmp_path, host=host)
 
 
+def test_open_browser_uses_authenticated_dashboard_url(tmp_path, monkeypatch):
+    import threading
+    import webbrowser
+
+    import uvicorn
+
+    opened = []
+    apps = []
+
+    class ImmediateTimer:
+        def __init__(self, interval, callback, args):
+            self.callback, self.args = callback, args
+
+        def start(self):
+            self.callback(*self.args)
+
+    monkeypatch.setattr(threading, "Timer", ImmediateTimer)
+    monkeypatch.setattr(webbrowser, "open", opened.append)
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kw: apps.append(app))
+    monkeypatch.setattr("contextbridge.local_api._ui_directory", lambda: tmp_path)
+    run_server(tmp_path, port=9876, open_browser=True)
+    assert opened == [f"http://127.0.0.1:9876/ui/#token={apps[0].state.session_token}"]
+
+
 def test_serve_binds_only_loopback_and_prints_fresh_token(tmp_path, monkeypatch, capsys):
     import uvicorn
 

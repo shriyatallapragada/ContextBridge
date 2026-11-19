@@ -195,6 +195,49 @@ function graphRoutes() {
 }
 
 describe("project guide graph", () => {
+  it("shows automatic descriptions, file names, counts and imports without starting a model", async () => {
+    const graph = {
+      ...OVERVIEW,
+      nodes: OVERVIEW.nodes.map((node) => ({
+        ...node, purpose: "Reusable interface pieces for building screens.",
+        purpose_source: "automatic", ai_explanation: null,
+        top_files: ["components/Card.tsx", "components/Button.tsx", "components/Input.tsx"],
+        uses_count: 3, used_by_count: 2,
+      })),
+      edges: [{ source: OVERVIEW.nodes[0].id, target: OVERVIEW.nodes[1].id, kind: "imports", count: 3 }],
+    };
+    const { calls } = mockFetch([{ match: "/v1/graph", body: graph }]);
+    setToken();
+    render(<ArchitectureTab />);
+    await screen.findAllByText("Automatic · folder conventions");
+    expect(screen.getAllByText("Card.tsx").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("uses 3 / used by 2").length).toBeGreaterThan(0);
+    expect(screen.getAllByRole("button", { name: "Explain", exact: true }).length).toBeGreaterThan(0);
+    expect(screen.getByText("imports 3 files")).toBeInTheDocument();
+    expect(calls.some((call) => call.url.includes("/explain"))).toBe(false);
+  });
+
+  it("keeps 55 nodes in separate left-to-right layers at readable zoom with scroll panning", async () => {
+    const nodes = Array.from({ length: 55 }, (_, index) => ({
+      id: `large-${index}`, kind: "folder", path: `part${index}`, label: `Part ${index}`,
+      purpose: "Shared helpers.", purpose_source: "automatic", file_count: 1,
+    }));
+    const edges = nodes.slice(1).map((node, index) => ({ source: nodes[index].id, target: node.id, kind: "imports", count: 1 }));
+    mockFetch([{ match: "/v1/graph", body: { nodes, edges, meta: { scanned_files: 55 } } }]);
+    setToken();
+    render(<ArchitectureTab />);
+    await screen.findByTestId("rf-node-large-54");
+    const props = globalThis.__rfProps;
+    expect(props.minZoom).toBe(1);
+    expect(props.defaultViewport.zoom).toBe(1);
+    expect(props.panOnScroll).toBe(true);
+    expect(props.panOnDrag).toBe(true);
+    expect(props.zoomOnScroll).toBe(false);
+    const positions = new Map(props.nodes.map((node) => [node.id, node.position]));
+    expect(new Set(props.nodes.map((node) => `${node.position.x},${node.position.y}`)).size).toBe(55);
+    edges.forEach((edge) => expect(positions.get(edge.target).x).toBeGreaterThan(positions.get(edge.source).x));
+  });
+
   it("lets offline users retry, close, or open Settings from the provider error", async () => {
     const onNavigate = vi.fn();
     const { calls } = mockFetch([

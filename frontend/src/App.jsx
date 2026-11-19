@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiRequest, clearToken, isStorageAvailable, onAuthError, resolveToken, saveToken } from "./api.js";
 import { useAsyncData } from "./hooks.js";
-import { ErrorBanner, Spinner } from "./components/ui.jsx";
+import { ErrorBanner, Modal, Spinner } from "./components/ui.jsx";
 import OverviewTab from "./components/OverviewTab.jsx";
 import TasksTab from "./components/TasksTab.jsx";
 import ChangesTestsTab from "./components/ChangesTestsTab.jsx";
@@ -89,17 +89,27 @@ function Icon({ name }) {
   );
 }
 
-function ProjectHeader({ project }) {
+function ProjectHeader({ project, onSwitched }) {
   const { data, loading, error, reload } = project;
+  const [choosing, setChoosing] = useState(false);
+  const [path, setPath] = useState("");
+  const [switchError, setSwitchError] = useState(null);
+  const [switching, setSwitching] = useState(false);
+  const switchProject = async (event) => {
+    event.preventDefault();
+    setSwitching(true);
+    setSwitchError(null);
+    try {
+      await apiRequest("/v1/project", { method: "POST", body: { path: path.trim() } });
+      setChoosing(false);
+      onSwitched();
+    } catch (error) { setSwitchError(error.message); }
+    finally { setSwitching(false); }
+  };
   return (
     <div className="border-b border-on-dark/15 px-4 py-4">
       <div className="flex items-center gap-2">
-        <span
-          aria-hidden="true"
-          className="flex h-8 w-8 items-center justify-center rounded-control bg-cardamom text-sm font-bold text-chai"
-        >
-          CB
-        </span>
+        <img src={`${import.meta.env.BASE_URL}logo.svg`} alt="" aria-hidden="true" className="h-10 w-10 shrink-0" />
         <span className="text-base font-bold tracking-wide text-on-dark">ContextBridge</span>
       </div>
 
@@ -128,14 +138,21 @@ function ProjectHeader({ project }) {
         ) : null}
       </div>
 
-      <p className="hint mt-3 rounded-control bg-black/15 px-2.5 py-2 text-on-dark-muted">
-        <span aria-hidden="true" className="mr-1 font-bold text-cardamom">
-          i
-        </span>
-        This dashboard shows one project at a time — the one <code className="kbd">cb serve</code>{" "}
-        was started in. To switch projects, stop it and restart{" "}
-        <code className="kbd">cb serve</code> in the other directory.
-      </p>
+      <button className="btn btn-on-dark btn-block mt-3" onClick={() => {
+        setPath(data?.root ?? ""); setSwitchError(null); setChoosing(true);
+      }}>Change project</button>
+      {choosing && <Modal title="Change project" onClose={switching ? undefined : () => setChoosing(false)}>
+        <form onSubmit={switchProject} className="space-y-3">
+          <label className="label" htmlFor="project-folder">Project folder</label>
+          <input id="project-folder" className="field w-full" value={path} onChange={(event) => setPath(event.target.value)} autoFocus placeholder="/Users/you/Documents/MyProject" />
+          <p className="hint">Paste the full folder path. In Finder, select the folder and press Option–Command–C. Unsaved form drafts will be cleared.</p>
+          <ErrorBanner message={switchError} />
+          <div className="flex gap-2">
+            <button type="submit" className="btn btn-primary" disabled={switching || !path.trim()}>{switching ? "Opening…" : "Open project"}</button>
+            <button type="button" className="btn btn-secondary" disabled={switching} onClick={() => setChoosing(false)}>Cancel</button>
+          </div>
+        </form>
+      </Modal>}
     </div>
   );
 }
@@ -145,6 +162,7 @@ export default function App() {
   const [authMessage, setAuthMessage] = useState(null);
   const [view, setView] = useState(() => readView());
   const [navOpen, setNavOpen] = useState(false);
+  const [projectVersion, setProjectVersion] = useState(0);
 
   // A 401 anywhere in the app drops the stale token and prompts for a new one.
   useEffect(
@@ -181,7 +199,7 @@ export default function App() {
     }
   }, []);
 
-  const project = useAsyncData(async () => (token ? apiRequest("/v1/dashboard") : null), [token]);
+  const project = useAsyncData(async () => (token ? apiRequest("/v1/dashboard") : null), [token, projectVersion]);
 
   const active = useMemo(
     () => DESTINATIONS.find((item) => item.id === view) ?? DESTINATIONS[0],
@@ -239,7 +257,9 @@ export default function App() {
         }`}
         aria-label="Primary"
       >
-        <ProjectHeader project={project} />
+        <ProjectHeader project={project} onSwitched={() => {
+          setProjectVersion((version) => version + 1); navigate("overview");
+        }} />
 
         <nav className="flex-1 space-y-1 px-3 py-4">
           {DESTINATIONS.map((item) => (
@@ -288,7 +308,7 @@ export default function App() {
 
       {/* Content */}
       <div className="min-w-0 flex-1">
-        <main className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
+        <main key={projectVersion} className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
           <ErrorBanner message={project.error && project.data ? project.error : null} onRetry={project.reload} />
           {view === "overview" && <OverviewTab {...screenProps} />}
           {view === "tasks" && <TasksTab {...screenProps} />}

@@ -49,12 +49,16 @@ def config(requests=100):
     return result
 
 
-def test_root_and_components_have_no_name_based_description(next_project):
+def test_root_and_components_have_automatic_convention_descriptions(next_project):
     graph = graph_view(scan_project(next_project))
     root = next(n for n in graph["nodes"] if n["path"] == ".")
     assert root["label"] == "Project root"
     assert all(
-        n["purpose"] == "Not explained yet" and not n["ai_explanation"] for n in graph["nodes"]
+        n["purpose_source"] == "automatic"
+        and n["purpose"] != "Not explained yet"
+        and not n["ai_explanation"]
+        and 1 <= len(n["top_files"]) <= 3
+        for n in graph["nodes"]
     )
     assert "explain a file for details" not in json.dumps(graph)
     assert "Files for" not in json.dumps(graph)
@@ -147,7 +151,7 @@ def test_explain_project_over_eight_files_pacing_map_reduce_and_cache(next_proje
             )
         )
         assert (
-            next(n for n in updated["nodes"] if n["path"] == ".")["purpose"] == "Not explained yet"
+            next(n for n in updated["nodes"] if n["path"] == ".")["purpose_source"] == "automatic"
         )
         ProjectSummarizer(
             next_project, db, config(), provider=provider, sleep=lambda _: None

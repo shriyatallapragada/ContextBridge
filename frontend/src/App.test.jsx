@@ -4,6 +4,41 @@ import App from "./App.jsx";
 import { DASHBOARD, mockFetch, setToken } from "./test-utils.js";
 
 describe("token gate and auth", () => {
+  it("changes projects without restarting the dashboard", async () => {
+    let current = DASHBOARD;
+    mockFetch([
+      { match: "/v1/dashboard", body: () => current },
+      { match: "/v1/project", method: "POST", body: () => {
+        current = { ...DASHBOARD, project: "Other project", root: "/Users/dev/Other" };
+        return { root: current.root, project: current.project };
+      } },
+    ]);
+    setToken();
+    render(<App />);
+    await screen.findByText("Demo project");
+    fireEvent.click(screen.getByRole("button", { name: "Change project" }));
+    fireEvent.change(screen.getByLabelText("Project folder"), { target: { value: "/Users/dev/Other" } });
+    fireEvent.click(screen.getByRole("button", { name: "Open project" }));
+    expect(await screen.findByText("Other project")).toBeInTheDocument();
+    expect(screen.getByText("/Users/dev/Other")).toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("keeps the current project when switching fails", async () => {
+    mockFetch([
+      { match: "/v1/dashboard", body: DASHBOARD },
+      { match: "/v1/project", method: "POST", status: 409, body: { detail: "Wait for the current run to finish." } },
+    ]);
+    setToken();
+    render(<App />);
+    await screen.findByText("Demo project");
+    fireEvent.click(screen.getByRole("button", { name: "Change project" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open project" }));
+    expect(await screen.findByText(/Wait for the current run/)).toBeInTheDocument();
+    expect(screen.getByText("Demo project")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
   it("asks for a token when none is stored", () => {
     mockFetch([{ match: "/v1/dashboard", body: DASHBOARD }]);
     render(<App />);
@@ -47,7 +82,7 @@ describe("token gate and auth", () => {
     // Project header: name + path + honest switch-project note.
     expect(screen.getByText("Demo project")).toBeInTheDocument();
     expect(screen.getByText("/Users/dev/ContextBridge")).toBeInTheDocument();
-    expect(screen.getByText(/restart/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Change project" })).toBeInTheDocument();
   });
 
   it("returns to the gate with an explanation when the API rejects the token", async () => {

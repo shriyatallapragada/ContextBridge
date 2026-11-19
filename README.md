@@ -100,6 +100,12 @@ cb mcp        # stdio MCP server for coding agents
 
 ### Web dashboard
 
+On macOS, double-click **Start-ContextBridge.command** in this checkout. It builds
+the dashboard and opens the browser automatically (requires uv and Node.js).
+Keep its terminal open; Ctrl-C stops the app. You can also run `uv run cb serve --open`.
+Use **Change project** in the sidebar and paste a folder path to switch without
+restarting. Switching clears unsaved form drafts; wait for active runs to finish first.
+
 Build it once, then serve:
 
 ```bash
@@ -117,8 +123,8 @@ token on its own line instead.
 The sidebar links to Overview, Notes and tasks, Changes and tests, Hand off,
 Project guide, Chat bridge and Settings. The explicit Project goal is saved in
 SQLite and takes precedence in handoffs; otherwise a logged `Goal:` note or
-manifest/README description can supply the Goal. To switch projects, stop the
-server and restart it with the new project directory.
+manifest/README description can supply the Goal. To switch projects, use
+**Change project** in the sidebar.
 
 Start offline; a model is not required for handoffs, chat transfer, or the
 architecture map. Hosted model requests are opt-in. Chat Bridge task previews

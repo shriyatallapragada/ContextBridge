@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import secrets
@@ -62,6 +63,11 @@ class HandoffRequest(BaseModel):
 class IntentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     north_star: str = Field(min_length=1, max_length=4000)
+
+
+class ProjectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str = Field(min_length=1, max_length=4096)
 
 
 class TaskRequest(BaseModel):
@@ -302,6 +308,7 @@ def create_app(root: Path) -> FastAPI:
     explain_slot = _ExplainSlot()
     handoff_lock = threading.Lock()
     latest_preview: tuple[str, HandoffRequest, PreparedHandoff, list[str]] | None = None
+    request_lock = asyncio.Lock()
 
     @app.middleware("http")
     async def authenticate(request: Request, call_next: Any) -> Any:
@@ -318,7 +325,9 @@ def create_app(root: Path) -> FastAPI:
                 status_code=401,
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        return await call_next(request)
+        # Keep project switches ordered with API operations; jobs retain their service.
+        async with request_lock:
+            return await call_next(request)
 
     @app.exception_handler(ContextBridgeError)
     async def project_error(request: Request, exc: ContextBridgeError) -> JSONResponse:
@@ -353,6 +362,26 @@ def create_app(root: Path) -> FastAPI:
         return result
 
     # ----- dashboard: intent, tasks, momentum, chat import (all deterministic) -----
+
+    @app.post("/v1/project")
+    def switch_project(body: ProjectRequest) -> dict[str, str]:
+        nonlocal service, test_slot, explain_slot, latest_preview
+        if test_slot.running or explain_slot.running:
+            raise HTTPException(
+                status_code=409,
+                detail="Wait for the current run to finish before switching projects.",
+            )
+        path = Path(body.path).expanduser()
+        if not path.is_absolute() or not path.is_dir():
+            raise UserError("Enter the full path to an existing project folder.")
+        candidate = ProjectService.for_path(path.resolve())
+        if not candidate.is_initialized():
+            candidate.init(install_hook=False)
+        service = candidate
+        app.state.project_root = str(service.root)
+        test_slot, explain_slot = _TestRunSlot(), _ExplainSlot()
+        latest_preview = None
+        return {"root": str(service.root), "project": service.name}
 
     @app.get("/v1/dashboard")
     def dashboard(refresh: bool = Query(default=False)) -> dict[str, Any]:
@@ -811,7 +840,9 @@ def create_app(root: Path) -> FastAPI:
     return app
 
 
-def run_server(root: Path, *, port: int = 8765, host: str = LOOPBACK) -> None:
+def run_server(
+    root: Path, *, port: int = 8765, host: str = LOOPBACK, open_browser: bool = False
+) -> None:
     if host != LOOPBACK:
         raise UserError("The local API may bind only to 127.0.0.1.")
     if not 1 <= port <= 65535:
@@ -829,6 +860,14 @@ def run_server(root: Path, *, port: int = 8765, host: str = LOOPBACK) -> None:
             "Open the dashboard URL to use the API. Ctrl-C stops the server.",
             flush=True,
         )
+        if open_browser:
+            import webbrowser
+
+            timer = threading.Timer(
+                1, webbrowser.open, args=(f"http://{LOOPBACK}:{port}/ui/#token={token}",)
+            )
+            timer.daemon = True
+            timer.start()
     else:
         print(f"Session token: {app.state.session_token}", flush=True)
         print(

@@ -4,11 +4,12 @@ import {
   applyNodeChanges,
   Background,
   BackgroundVariant,
+  BaseEdge,
   Controls,
   Handle,
+  getSmoothStepPath,
   MarkerType,
   MiniMap,
-  Panel,
   Position,
   ReactFlow,
 } from "@xyflow/react";
@@ -40,7 +41,7 @@ const KIND_BADGE_TONES = {
   collapsed: "neutral",
 };
 
-const NODE_WIDTH = 250;
+const NODE_WIDTH = 300;
 
 function coverageText(node) {
   const total = node.file_count ?? 1;
@@ -52,6 +53,7 @@ function coverageText(node) {
 }
 
 function isUnexplained(node) {
+  if (node.kind === "folder") return !node.ai_explanation;
   return !node.purpose || node.purpose === "Not explained yet";
 }
 
@@ -75,7 +77,10 @@ function KindNode({ data, selected }) {
       }}
       title={data.purpose || data.label}
     >
-      <Handle type="target" position={Position.Left} />
+      {(data.targetPorts ?? []).map((id, index, ports) => (
+        <Handle key={id} id={`in-${id}`} type="target" position={Position.Left}
+          style={{ top: `${20 + (index + 1) * 60 / (ports.length + 1)}%` }} />
+      ))}
       <div className="flex items-start justify-between gap-2">
         <span className="min-w-0 flex-1 truncate text-base font-bold text-ink" title={data.label}>
           {data.label}
@@ -87,10 +92,19 @@ function KindNode({ data, selected }) {
         )}
       </div>
       <div className="mt-0.5 text-sm uppercase tracking-wide text-ink-muted">{data.kind}</div>
+      {data.automatic && <Badge tone="neutral">Automatic · folder conventions</Badge>}
 
       <p className="mt-1.5 line-clamp-3 text-sm leading-snug text-ink-muted">
         {data.purpose || "Not explained yet"}
       </p>
+      {data.topFiles?.length > 0 && (
+        <ul className="mt-2 text-sm leading-snug text-ink">
+          {data.topFiles.map((path) => <li key={path} className="truncate" title={path}>{path.split("/").pop()}</li>)}
+        </ul>
+      )}
+      {data.kind === "folder" && (
+        <p className="mt-2 text-sm text-ink-muted">uses {data.usesCount} / used by {data.usedByCount}</p>
+      )}
 
       {(data.kind === "folder" || coverage) && (
         <div className="mt-1.5 flex flex-wrap gap-1.5 text-sm text-ink-muted">
@@ -116,81 +130,81 @@ function KindNode({ data, selected }) {
           Explain
         </button>
       )}
-      <Handle type="source" position={Position.Right} />
+      {(data.sourcePorts ?? []).map((id, index, ports) => (
+        <Handle key={id} id={`out-${id}`} type="source" position={Position.Right}
+          style={{ top: `${20 + (index + 1) * 60 / (ports.length + 1)}%` }} />
+      ))}
     </div>
   );
 }
 
 const nodeTypes = { kind: KindNode };
 
-const X_STEP = 300;
-const Y_STEP = 194;
-const ROWS_PER_COLUMN = 7;
-const MAX_LAYER = 6;
+function ImportEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, data, markerEnd, style }) {
+  const [path] = getSmoothStepPath({
+    sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition,
+    centerX: sourceX + 24 + (data.channel ?? 0) * 16,
+    borderRadius: 10,
+  });
+  return <BaseEdge id={id} path={path} markerEnd={markerEnd} style={style}
+    label={data.label} labelX={targetX - 80} labelY={targetY - 14}
+    labelStyle={{ fontSize: 14, fill: "#632626" }} labelBgStyle={{ fill: "#FCFBF7" }} />;
+}
 
-// Deterministic layered layout: dependency depth → column, capped so cyclic
-// import graphs stay on screen. Falls back to a grid when there are no edges.
+const edgeTypes = { imports: ImportEdge };
+
+const X_STEP = 460;
+const Y_STEP = 420;
+
+// Collapse import cycles before assigning dependency layers. Each layer has its
+// own column, so large graphs grow vertically instead of shrinking their text.
 function computePositions(nodes, edges) {
   const positions = new Map();
-  if (nodes.length === 0) return positions;
-
   const ids = new Set(nodes.map((node) => node.id));
-  const validEdges = edges.filter(
-    (edge) =>
-      ids.has(edge.source) &&
-      ids.has(edge.target) &&
-      edge.source !== edge.target // self-loops must not push a node off-screen
-  );
-
-  const center = (count) => -((count - 1) * Y_STEP) / 2;
-
-  if (validEdges.length === 0) {
-    const cols = Math.min(4, Math.ceil(Math.sqrt(nodes.length)));
-    const rows = Math.ceil(nodes.length / cols);
-    nodes.forEach((node, index) => {
-      positions.set(node.id, {
-        x: (index % cols) * X_STEP,
-        y: Math.floor(index / cols) * Y_STEP + center(rows),
-      });
-    });
-    return positions;
+  const outgoing = new Map(nodes.map((node) => [node.id, []]));
+  for (const edge of edges) {
+    if (ids.has(edge.source) && ids.has(edge.target)) outgoing.get(edge.source).push(edge.target);
   }
-
-  const layer = new Map(nodes.map((node) => [node.id, 0]));
-  for (let pass = 0; pass < MAX_LAYER; pass += 1) {
-    let changed = false;
-    for (const edge of validEdges) {
-      const next = Math.min(layer.get(edge.source) + 1, MAX_LAYER);
-      if (next > layer.get(edge.target)) {
-        layer.set(edge.target, next);
-        changed = true;
-      }
+  const indices = new Map(), low = new Map(), stack = [], active = new Set(), groups = [];
+  let nextIndex = 0;
+  function visit(id) {
+    indices.set(id, nextIndex); low.set(id, nextIndex++);
+    stack.push(id); active.add(id);
+    for (const target of outgoing.get(id)) {
+      if (!indices.has(target)) {
+        visit(target); low.set(id, Math.min(low.get(id), low.get(target)));
+      } else if (active.has(target)) low.set(id, Math.min(low.get(id), indices.get(target)));
     }
-    if (!changed) break;
+    if (low.get(id) === indices.get(id)) {
+      const group = [];
+      let member;
+      do { member = stack.pop(); active.delete(member); group.push(member); } while (member !== id);
+      groups.push(group.sort());
+    }
   }
-
-  const layers = new Map();
-  for (const node of nodes) {
-    const index = layer.get(node.id) ?? 0;
-    if (!layers.has(index)) layers.set(index, []);
-    layers.get(index).push(node);
+  [...ids].sort().forEach((id) => { if (!indices.has(id)) visit(id); });
+  const owner = new Map();
+  groups.forEach((group, index) => group.forEach((id) => owner.set(id, index)));
+  const links = groups.map(() => new Set()), degree = groups.map(() => 0), depth = groups.map(() => 0);
+  for (const edge of edges) {
+    const a = owner.get(edge.source), b = owner.get(edge.target);
+    if (a !== undefined && b !== undefined && a !== b && !links[a].has(b)) {
+      links[a].add(b); degree[b]++;
+    }
   }
-
-  let x = 0;
-  for (const index of [...layers.keys()].sort((a, b) => a - b)) {
-    const group = layers.get(index);
-    const subColumns = Math.ceil(group.length / ROWS_PER_COLUMN);
-    group.forEach((node, i) => {
-      const col = Math.floor(i / ROWS_PER_COLUMN);
-      const row = i % ROWS_PER_COLUMN;
-      const colCount = Math.min(ROWS_PER_COLUMN, group.length - col * ROWS_PER_COLUMN);
-      positions.set(node.id, {
-        x: x + col * X_STEP,
-        y: row * Y_STEP + center(colCount),
-      });
-    });
-    x += subColumns * X_STEP;
+  const queue = groups.map((_, index) => index).filter((index) => degree[index] === 0);
+  for (const index of queue) {
+    for (const target of links[index]) {
+      depth[target] = Math.max(depth[target], depth[index] + 1);
+      if (--degree[target] === 0) queue.push(target);
+    }
   }
+  const rows = new Map();
+  [...nodes].sort((a, b) => Number(a.label.startsWith("+")) - Number(b.label.startsWith("+"))).forEach((node) => {
+    const column = depth[owner.get(node.id)], row = rows.get(column) ?? 0;
+    positions.set(node.id, { x: column * X_STEP, y: row * Y_STEP });
+    rows.set(column, row + 1);
+  });
   return positions;
 }
 
@@ -367,6 +381,12 @@ export default function ArchitectureTab({ onNavigate }) {
           kind: node.kind,
           path: node.path,
           purpose: node.purpose,
+          automatic: node.purpose_source === "automatic",
+          topFiles: node.top_files ?? [],
+          usesCount: node.uses_count ?? 0,
+          usedByCount: node.used_by_count ?? 0,
+          sourcePorts: edges.filter((edge) => edge.source === node.id).map((edge) => `${edge.source}-${edge.target}-${edge.kind}`),
+          targetPorts: edges.filter((edge) => edge.target === node.id).map((edge) => `${edge.source}-${edge.target}-${edge.kind}`),
           ai: node.ai_explanation ?? null,
           fileCount: node.file_count ?? 1,
           explainedFiles: node.explained_files ?? 0,
@@ -387,12 +407,20 @@ export default function ArchitectureTab({ onNavigate }) {
       }))
     );
     setRfEdges(
-      edges.map((edge) => ({
+      edges.map((edge, index) => ({
         id: `${edge.source}-${edge.target}-${edge.kind}`,
         source: edge.source,
         target: edge.target,
+        sourceHandle: `out-${edge.source}-${edge.target}-${edge.kind}`,
+        targetHandle: `in-${edge.source}-${edge.target}-${edge.kind}`,
+        type: edge.kind === "imports" ? "imports" : "smoothstep",
+        pathOptions: { offset: 24 + index % 5 * 12, borderRadius: 10 },
+        label: edge.kind === "imports" ? `imports ${edge.count ?? 1} files` : edge.kind,
+        labelStyle: { fontSize: 14, fill: "#632626" },
+        labelBgStyle: { fill: "#FCFBF7" },
         data: {
-          label: edge.count > 1 ? `${edge.kind} ×${edge.count}` : edge.kind,
+          channel: edges.filter((item) => item.source === edge.source).indexOf(edge),
+          label: edge.kind === "imports" ? `imports ${edge.count ?? 1} files` : edge.kind,
           kind: edge.kind,
         },
         markerEnd: { type: MarkerType.ArrowClosed, color: "#BF8B67" },
@@ -404,7 +432,7 @@ export default function ArchitectureTab({ onNavigate }) {
     setSelectedEdgeId(null);
   }, [graph, startExplain]);
 
-  // Edge labels appear only on hover/selection so they never overlap.
+  // Import counts stay visible; selection preserves the same grounded label.
   const visibleEdges = useMemo(
     () =>
       rfEdges.map((edge) =>
@@ -582,6 +610,7 @@ export default function ArchitectureTab({ onNavigate }) {
       )}
 
       <ErrorBanner message={error} onRetry={() => setReloadKey((key) => key + 1)} />
+      {meta.notice && <p className="hint">{meta.notice}</p>}
 
       {loading ? (
         <Spinner label="Building graph…" />
@@ -607,6 +636,7 @@ export default function ArchitectureTab({ onNavigate }) {
               nodes={rfNodes}
               edges={visibleEdges}
               nodeTypes={nodeTypes}
+              edgeTypes={edgeTypes}
               onNodesChange={(changes) => setRfNodes((current) => applyNodeChanges(changes, current))}
               onEdgesChange={(changes) => setRfEdges((current) => applyEdgeChanges(changes, current))}
               defaultViewport={initialViewport}
@@ -636,13 +666,6 @@ export default function ArchitectureTab({ onNavigate }) {
                 nodeColor={(node) => KIND_TONES[node.data?.kind]?.dot ?? "#855656"}
                 maskColor="rgba(99, 38, 38, 0.12)"
               />
-              <Panel position="top-right">
-                {meta.notice && (
-                  <span className="block max-w-[260px] rounded-control border border-line bg-surface px-3 py-2 text-right text-sm leading-snug text-ink-muted">
-                    {meta.notice}
-                  </span>
-                )}
-              </Panel>
             </ReactFlow>
           </div>
 
@@ -699,7 +722,7 @@ export default function ArchitectureTab({ onNavigate }) {
             {kind}
           </span>
         ))}
-        <span>Arrow = detected import or call — hover an arrow to label it.</span>
+        <span>Arrow = detected import or call; import counts refer to distinct files.</span>
       </div>
 
       {explainTarget && (

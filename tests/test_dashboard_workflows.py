@@ -61,6 +61,55 @@ def test_goal_handoff_notes_and_chat(git_repo: Path) -> None:
         assert "Canonical objective" in (git_repo / "HANDOFF.md").read_text()
 
 
+def test_project_switch_preserves_data_and_clears_preview(git_repo: Path, tmp_path: Path):
+    other = tmp_path / "other-project"
+    other.mkdir()
+    with client_for(git_repo) as client:
+        client.put("/v1/intent", json={"north_star": "Original goal"})
+        preview = client.post("/v1/handoffs/preview", json={"to_agent": "generic"}).json()
+        switched = client.post("/v1/project", json={"path": str(other)})
+        assert switched.status_code == 200
+        assert Path(switched.json()["root"]) == other.resolve()
+        assert client.get("/v1/dashboard").json()["project"] == "other-project"
+        assert client.get("/v1/intent").json()["north_star"] is None
+        assert (
+            client.post(
+                "/v1/handoffs", json={"to_agent": "generic", "preview_id": preview["preview_id"]}
+            ).status_code
+            == 400
+        )
+        assert not (other / "HANDOFF.md").exists()
+        assert client.post("/v1/project", json={"path": str(git_repo)}).status_code == 200
+        assert client.get("/v1/intent").json()["north_star"] == "Original goal"
+        assert client.post("/v1/project", json={"path": str(other / "missing")}).status_code == 400
+        assert client.get("/v1/intent").json()["north_star"] == "Original goal"
+        assert (
+            client.post(
+                "/v1/project", json={"path": str(other)}, headers={"Authorization": ""}
+            ).status_code
+            == 401
+        )
+
+
+def test_project_switch_waits_for_background_work(git_repo: Path, monkeypatch):
+    started, release = Event(), Event()
+
+    def run(self, command, on_output=None):
+        started.set()
+        release.wait(3)
+        raise RuntimeError("Fixture run finished")
+
+    monkeypatch.setattr(ProjectService, "run_tests", run)
+    with client_for(git_repo) as client:
+        try:
+            assert client.post("/v1/tests/run", json={"command": "fixture"}).status_code == 202
+            assert started.wait(2)
+            assert client.post("/v1/project", json={"path": str(git_repo)}).status_code == 409
+        finally:
+            release.set()
+        finished(client, "/v1/tests/status")
+
+
 def test_changes_command_and_settings(git_repo: Path, monkeypatch) -> None:
     (git_repo / "working.py").write_text("pass\n")
     monkeypatch.setattr(

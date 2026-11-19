@@ -28,8 +28,6 @@ SKIP = {
     "build",
     "vendor",
     "__pycache__",
-    "tests",
-    "test",
     "secrets",
     "credentials",
     "keys",
@@ -567,6 +565,47 @@ def _component_name(group: str) -> str:
     return group.replace("_", " ").replace("-", " ")
 
 
+def _automatic_component(group: str, members: list[GraphNode]) -> str:
+    """Conventional roles, explicitly heuristic; never a model-generated claim."""
+    parts = set(Path(group).parts)
+    paths = [n.path for n in members]
+    if group == "Other project parts":
+        return "Additional small folders grouped to keep the overview readable."
+    if any(p == "lib/main.dart" for p in paths):
+        return "Flutter startup and application setup."
+    if "test" in parts or "tests" in parts or "__tests__" in parts:
+        return "Checks that verify the project behaves as expected."
+    if "docs" in parts or "documentation" in parts:
+        return "Project documentation and supporting examples."
+    if parts & {"assets", "public", "static", "images"}:
+        return "Images, styles and other resources used by the app."
+    if parts & {"api", "routes"}:
+        return "Request endpoints and routing code."
+    if parts & {"pages", "app"} and any(
+        Path(p).stem in {"page", "layout", "route", "loading", "error"} for p in paths
+    ):
+        return "Next.js pages, shared layouts and route entry points."
+    if parts & {"components", "widgets"}:
+        return "Reusable interface pieces for building screens."
+    if "hooks" in parts:
+        return "Reusable hooks that connect interface state and behavior."
+    if parts & {"models", "entities"}:
+        return "Data types and models shared by the app."
+    if "services" in parts:
+        return "Service code that coordinates application work."
+    if parts & {"features", "screens"} and any(p.endswith(".dart") for p in paths):
+        return "Flutter feature screens and their supporting code."
+    if "data" in parts and any(p.endswith(".dart") for p in paths):
+        return "Flutter data access and storage code."
+    if parts & {"lib", "utils", "utilities", "helpers", "core"}:
+        return "Shared helpers and supporting application code."
+    if parts & {"pages", "app"}:
+        return "Application screens and entry-point code."
+    if group in {".", ""}:
+        return "Top-level source files and application setup."
+    return "Source files grouped by their shared folder."
+
+
 def component_digest(members: list[GraphNode], hashes: dict[str, str]) -> str:
     data = [
         (n.path, hashes[n.path], n.ai_explanation) for n in sorted(members, key=lambda n: n.path)
@@ -731,9 +770,17 @@ def graph_view(
                 None,
             )
             ai = {"label": "AI-written", "text": summary["explanation"]} if summary else None
-            purpose = ai["text"] if ai else "Not explained yet"
-            source = "AI-written" if ai else "offline"
+            purpose = ai["text"] if ai else _automatic_component(group, members)
+            source = "AI-written" if ai else "automatic"
             name = _component_name(group)
+            if group == "Other project parts":
+                folders = {
+                    "/".join(Path(n.path).parts[:2])
+                    if len(Path(n.path).parts) > 2
+                    else str(Path(n.path).parent)
+                    for n in members
+                }
+                name = f"+{len(folders)} more"
             node = GraphNode(
                 node_id("folder", group),
                 "folder",
@@ -752,10 +799,15 @@ def graph_view(
             nodes[node.id] = node
             for member in members:
                 projected[member.id] = node.id
-        edges = [
-            GraphEdge(projected[e.source], projected[e.target], "imports", e.evidence)
+        # Count distinct imported files, not repeated imports of the same target.
+        component_imports = {
+            (projected[e.source], projected[e.target], e.target): e.evidence
             for e in file_edges.values()
             if e.kind == "imports" and projected[e.source] != projected[e.target]
+        }
+        edges = [
+            GraphEdge(a, b, "imports", evidence)
+            for (a, b, _), evidence in component_imports.items()
         ]
         ranked = sorted(
             nodes,
@@ -876,6 +928,27 @@ def graph_view(
     node_dicts = []
     for node in displayed.values():
         data = asdict(node)
+        if view == "overview" and node.kind == "folder":
+            members = set(node.related_files)
+            data["top_files"] = node.related_files[:3]
+            data["uses_count"] = len(
+                {
+                    model.graph_nodes[e.target].path
+                    for e in file_edges.values()
+                    if e.kind == "imports"
+                    and model.graph_nodes[e.source].path in members
+                    and model.graph_nodes[e.target].path not in members
+                }
+            )
+            data["used_by_count"] = len(
+                {
+                    model.graph_nodes[e.source].path
+                    for e in file_edges.values()
+                    if e.kind == "imports"
+                    and model.graph_nodes[e.target].path in members
+                    and model.graph_nodes[e.source].path not in members
+                }
+            )
         # Component coverage: folders count explained members; a file/function/class
         # node is explained only when it carries an AI-written explanation.
         data["explained_count"] = (

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240">
+  <title>ContextBridge bridge logo</title>
+  <rect x="8" y="8" width="224" height="224" rx="52" fill="#632626"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M48 138C76 62 164 62 192 138M38 138H202" stroke="#FBF9F2" stroke-width="11"/>
+    <path d="M84 138V100M120 138V88M156 138V100" stroke="#BF8B67" stroke-width="8"/>
+    <path d="M56 170C76 160 96 180 116 170S156 180 158 170M74 192C94 182 114 202 134 192S174 202 176 192" stroke="#DBCB96" stroke-width="9"/>
+  </g>
+</svg>
